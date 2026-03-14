@@ -67,7 +67,9 @@ const pixelsModeHelpEl = document.getElementById("pixels-mode-help");
 const pixelsAssignmentListEl = document.getElementById("pixels-assignment-list");
 const pixelsDisconnectAllBtn = document.getElementById("pixels-disconnect-all");
 const pixelsRollDialogEl = document.getElementById("pixels-roll-dialog");
+const pixelsRollTitleEl = document.getElementById("pixels-roll-title");
 const pixelsRollStatusEl = document.getElementById("pixels-roll-status");
+const pixelsRollListEl = document.getElementById("pixels-roll-list");
 const pixelsStatusEl = document.getElementById("pixels-status");
 const clearLogBtn = document.getElementById("clear-log");
 const characterTemplate = document.getElementById("character-template");
@@ -97,11 +99,14 @@ const settingsMenuEls = Array.from(document.querySelectorAll(".settings-menu"));
 const pixels = {
   sdk: null,
   loading: false,
+  reconnecting: false,
   simulated: false,
   useForRolls: false,
   mode: PIXELS_MODE.PC_SET_3,
   assignmentsByCharacterId: {},
   sharedSet: [null, null, null],
+  rememberedAssignmentsByCharacterId: {},
+  rememberedSharedSet: [null, null, null],
   lastStatus:
     "Pixels: nicht verbunden (Chromium-Browser mit Web Bluetooth erforderlich).",
 };
@@ -111,6 +116,9 @@ let editingCharacterId = null;
 let warningDialogResolver = null;
 let draggedRosterCharacterId = null;
 let draggedTurnGroupIndex = null;
+const rollDialogState = {
+  rowsByCharacterId: new Map(),
+};
 
 addForm.addEventListener("submit", (event) => {
   event.preventDefault();
@@ -557,18 +565,28 @@ async function generateNewTurn() {
   const usePixelsForTurn = canUsePixelsForRolls();
   const rolledCharacters = [];
   const rollDetailsByCharacterId = new Map();
-  const shouldShowPixelsRollDialog = usePixelsForTurn && state.characters.some((character) => character.type === "PC");
+  const shouldShowPixelsRollDialog = preparePixelsRollDialog(state.characters, usePixelsForTurn, "INI Würfelphase");
   if (shouldShowPixelsRollDialog) {
-    openPixelsRollDialog();
-    setPixelsRollDialogStatus("Warte auf Wurf...");
+    setPixelsRollDialogStatus("Warte auf die anstehenden INI-Würfe.");
   }
 
   try {
     for (const character of state.characters) {
       if (character.incapacitated) {
+        if (shouldShowPixelsRollDialog) {
+          updatePixelsRollDialogRow(character.id, {
+            mode: "skip",
+            stateClass: "done",
+            status: "Übersprungen.",
+            detail: "Aktionsunfähig - kein INI-Wurf in dieser KR.",
+            clearControls: true,
+            resultBadges: [],
+          });
+        }
         rolledCharacters.push({
           ...character,
           lastRoll: null,
+          critBonusRoll: null,
           totalInitiative: null,
           lastPixelsFaces: null,
           unfreeDefensePenalty: 0,
@@ -579,15 +597,46 @@ async function generateNewTurn() {
         continue;
       }
 
+      const rollMode = getCharacterRollMode(character, usePixelsForTurn);
+      if (shouldShowPixelsRollDialog) {
+        updatePixelsRollDialogRow(character.id, {
+          mode: rollMode,
+          stateClass: rollMode === "auto" ? "pending" : "waiting",
+          status:
+            rollMode === "manual"
+              ? "Warte auf manuellen Wurf."
+              : rollMode === "pixels"
+                ? "Warte auf Pixels-Wurf."
+                : "Automatischer Wurf läuft.",
+          detail:
+            rollMode === "manual"
+              ? "3w6 im Dialog eingeben."
+              : rollMode === "pixels"
+                ? "Warte auf den verbundenen Würfel."
+                : "Dieser Wurf wird automatisch aufgelöst.",
+        });
+      }
       const rollData = await resolveCharacterRoll(character, usePixelsForTurn);
-      const surprisePenalty = character.surprised ? -10 : 0;
       const roll = rollData.total;
       rollDetailsByCharacterId.set(character.id, rollData);
+      const totalInitiative = computeTotalInitiative(character, {
+        lastRoll: roll,
+        critBonusRoll: rollData.critBonusRoll,
+        surprised: character.surprised,
+      });
+      if (shouldShowPixelsRollDialog) {
+        updatePixelsRollDialogRowResult(character, rollData, totalInitiative, rollMode);
+      }
 
       rolledCharacters.push({
         ...character,
         lastRoll: roll,
-        totalInitiative: roll + character.ini + surprisePenalty,
+        critBonusRoll: rollData.critBonusRoll,
+        manualRoll:
+          rollData.source === "manual" && Number.isFinite(Number(rollData.manualRollValue))
+            ? clamp(Number(rollData.manualRollValue), 3, 18)
+            : character.manualRoll,
+        totalInitiative,
         lastPixelsFaces: Array.isArray(rollData.faces) ? rollData.faces.map((face) => Math.round(Number(face) || 0)) : null,
         unfreeDefensePenalty: 0,
         paradeClickCount: 0,
@@ -596,6 +645,9 @@ async function generateNewTurn() {
       });
     }
   } finally {
+    if (shouldShowPixelsRollDialog) {
+      setPixelsRollDialogStatus("INI-Würfe abgeschlossen.");
+    }
     closePixelsRollDialog();
   }
   state.characters = rolledCharacters;
@@ -647,8 +699,12 @@ async function generateNewTurn() {
           : rollDetails?.source === "pixels-fallback"
             ? `, Pixels Fallback (${rollDetails.error || "unbekannter Grund"})`
             : "";
+    const critBonusRollText =
+      action.critical === "success" && Number.isFinite(Number(character.critBonusRoll))
+        ? `, Krit-W6=${character.critBonusRoll}`
+        : "";
     logEvent(
-      `${action.name}: 3w6=${character.lastRoll}, INI ${character.ini}, ges. ${action.groupInitiative}${sourceText}${bonusText}${critText}${dazedText}.`
+      `${action.name}: 3w6=${character.lastRoll}, INI ${character.ini}, ges. ${action.groupInitiative}${sourceText}${critBonusRollText}${bonusText}${critText}${dazedText}.`
     );
   }
 
@@ -671,6 +727,7 @@ function captureTurnSnapshot(turnNumber) {
     rolls: state.characters.map((character) => ({
       id: character.id,
       lastRoll: character.lastRoll,
+      critBonusRoll: character.critBonusRoll ?? null,
       totalInitiative: character.totalInitiative,
       lastPixelsFaces: Array.isArray(character.lastPixelsFaces)
         ? character.lastPixelsFaces.map((face) => Math.round(Number(face) || 0))
@@ -691,6 +748,7 @@ function applyTurnSnapshot(snapshot) {
       return {
         ...character,
         lastRoll: null,
+        critBonusRoll: null,
         totalInitiative: null,
         lastPixelsFaces: null,
         dazedUntilRound: rollData?.dazedUntilRound ?? character.dazedUntilRound ?? null,
@@ -702,6 +760,7 @@ function applyTurnSnapshot(snapshot) {
     return {
       ...character,
       lastRoll: rollData.lastRoll,
+      critBonusRoll: rollData.critBonusRoll ?? null,
       totalInitiative: rollData.totalInitiative,
       lastPixelsFaces: Array.isArray(rollData.lastPixelsFaces)
         ? rollData.lastPixelsFaces.map((face) => Math.round(Number(face) || 0))
@@ -752,6 +811,7 @@ function invalidateTurnState(options = {}) {
     state.characters = state.characters.map((character) => ({
       ...character,
       lastRoll: keepCharacterRolls ? character.lastRoll : null,
+      critBonusRoll: keepCharacterRolls ? character.critBonusRoll ?? null : null,
       totalInitiative: keepCharacterRolls ? character.totalInitiative : null,
       lastPixelsFaces: keepCharacterRolls ? character.lastPixelsFaces ?? null : null,
       dazedUntilRound: clearDazed ? null : character.dazedUntilRound,
@@ -802,16 +862,10 @@ function toggleSurprised(id, value) {
       return character;
     }
 
-    const surprisePenalty = value ? -10 : 0;
-    const recalculatedTotalInitiative =
-      character.lastRoll === null || character.lastRoll === undefined
-        ? character.totalInitiative
-        : character.lastRoll + character.ini + surprisePenalty;
-
     return {
       ...character,
       surprised: value,
-      totalInitiative: recalculatedTotalInitiative,
+      totalInitiative: computeTotalInitiative(character, { surprised: value }),
     };
   });
 
@@ -840,16 +894,10 @@ function toggleSurprisedByType(type, value) {
     }
 
     affectedCount += 1;
-    const surprisePenalty = value ? -10 : 0;
-    const recalculatedTotalInitiative =
-      character.lastRoll === null || character.lastRoll === undefined
-        ? character.totalInitiative
-        : character.lastRoll + character.ini + surprisePenalty;
-
     return {
       ...character,
       surprised: value,
-      totalInitiative: recalculatedTotalInitiative,
+      totalInitiative: computeTotalInitiative(character, { surprised: value }),
     };
   });
 
@@ -897,6 +945,7 @@ function toggleIncapacitated(id, value) {
           ...character,
           incapacitated: value,
           lastRoll: value ? null : character.lastRoll,
+          critBonusRoll: value ? null : character.critBonusRoll ?? null,
           totalInitiative: value ? null : character.totalInitiative,
           lastPixelsFaces: value ? null : character.lastPixelsFaces ?? null,
         }
@@ -1161,8 +1210,7 @@ function saveCharacterEdits() {
 
   const editedCharacter = state.characters.find((item) => item.id === editingCharacterId) || null;
   if (editedCharacter && editedCharacter.lastRoll !== null) {
-    const surprisePenalty = editedCharacter.surprised ? -10 : 0;
-    editedCharacter.totalInitiative = editedCharacter.lastRoll + editedCharacter.ini + surprisePenalty;
+    editedCharacter.totalInitiative = computeTotalInitiative(editedCharacter);
   }
 
   if (state.turnEntries.length) {
@@ -1198,15 +1246,39 @@ async function rollCharacterIntoCurrentRound(id) {
 
   pushTurnOrderUndoSnapshot("INI-Nachwurf rückgängig.");
   const usePixelsForTurn = canUsePixelsForRolls();
-  const rollData = await resolveCharacterRoll(character, usePixelsForTurn);
-  const surprisePenalty = character.surprised ? -10 : 0;
-  const totalInitiative = rollData.total + character.ini + surprisePenalty;
+  const shouldShowPixelsRollDialog = preparePixelsRollDialog([character], usePixelsForTurn, "INI Nachwurf");
+  let rollData;
+  let totalInitiative = null;
+  try {
+    if (shouldShowPixelsRollDialog) {
+      setPixelsRollDialogStatus(`Warte auf den Nachwurf für ${character.name}.`);
+    }
+    const rollMode = getCharacterRollMode(character, usePixelsForTurn);
+    rollData = await resolveCharacterRoll(character, usePixelsForTurn);
+    totalInitiative = computeTotalInitiative(character, {
+      lastRoll: rollData.total,
+      critBonusRoll: rollData.critBonusRoll,
+    });
+    if (shouldShowPixelsRollDialog) {
+      updatePixelsRollDialogRowResult(character, rollData, totalInitiative, rollMode);
+      setPixelsRollDialogStatus(`Nachwurf für ${character.name} abgeschlossen.`);
+    }
+  } finally {
+    if (shouldShowPixelsRollDialog) {
+      closePixelsRollDialog();
+    }
+  }
 
   state.characters = state.characters.map((item) =>
     item.id === id
       ? {
           ...item,
           lastRoll: rollData.total,
+          critBonusRoll: rollData.critBonusRoll,
+          manualRoll:
+            rollData.source === "manual" && Number.isFinite(Number(rollData.manualRollValue))
+              ? clamp(Number(rollData.manualRollValue), 3, 18)
+              : item.manualRoll,
           totalInitiative,
           lastPixelsFaces: Array.isArray(rollData.faces) ? rollData.faces.map((face) => Math.round(Number(face) || 0)) : null,
           unfreeDefensePenalty: 0,
@@ -1216,7 +1288,11 @@ async function rollCharacterIntoCurrentRound(id) {
 
   rebuildTurnEntriesPreserveActive();
   syncCurrentSnapshotFromState();
-  logEvent(`INI nachgewürfelt: ${character.name} (3w6=${rollData.total}, ges. ${totalInitiative}).`);
+  const critBonusRollText =
+    Number.isFinite(Number(rollData.critBonusRoll)) && Number(rollData.critBonusRoll) > 0
+      ? `, Krit-W6=${rollData.critBonusRoll}`
+      : "";
+  logEvent(`INI nachgewürfelt: ${character.name} (3w6=${rollData.total}${critBonusRollText}, ges. ${totalInitiative}).`);
   persistAppState();
   render();
   editCharacterDialogEl?.close();
@@ -1489,13 +1565,17 @@ function renderRoster() {
       character.type === "PC" && character.useManualRoll && character.manualRoll !== null
         ? `, manuell=${character.manualRoll}`
         : "";
+    const critBonusRollText =
+      Number.isFinite(Number(character.critBonusRoll)) && Number(character.critBonusRoll) > 0
+        ? `, Krit-W6=${character.critBonusRoll}`
+        : "";
     const pixelsFacesText = Array.isArray(character.lastPixelsFaces) && character.lastPixelsFaces.length
       ? `, Pixels [${character.lastPixelsFaces.join(", ")}]`
       : "";
     const specialAbilityText = character.specialAbility ? `, Ch. Vorteil=${getSpecialAbilityLabel(character.specialAbility)}` : "";
     const dazedText = isCharacterDazed(character) ? `, Ben. bis Ende KR ${character.dazedUntilRound}` : "";
     const incapacitatedText = character.incapacitated ? ", Aktionsunfähig" : "";
-    const baseMetaText = `INI ${character.ini} | ${rollText}${manualText}${pixelsFacesText}${specialAbilityText}${dazedText}${incapacitatedText}`;
+    const baseMetaText = `INI ${character.ini} | ${rollText}${manualText}${critBonusRollText}${pixelsFacesText}${specialAbilityText}${dazedText}${incapacitatedText}`;
     const damagePenalty = computeDamagePenalty(character);
     const dazedPenalty = isCharacterDazed(character) ? 3 : 0;
     const effectiveQmPenalty = damagePenalty.qm + dazedPenalty;
@@ -2014,6 +2094,8 @@ function createCharacter(data) {
     manualRoll:
       data.manualRoll === null || data.manualRoll === undefined ? null : clamp(Number(data.manualRoll), 3, 18),
     lastRoll: data.lastRoll === null || data.lastRoll === undefined ? null : clamp(Number(data.lastRoll), 3, 18),
+    critBonusRoll:
+      data.critBonusRoll === null || data.critBonusRoll === undefined ? null : clamp(Number(data.critBonusRoll), 1, 6),
     lastPixelsFaces: Array.isArray(data.lastPixelsFaces)
       ? data.lastPixelsFaces.map((face) => Math.round(Number(face) || 0)).filter((face) => face >= 1 && face <= 6)
       : null,
@@ -2026,6 +2108,77 @@ function createCharacter(data) {
     incapacitated: Boolean(data.incapacitated),
     unfreeDefensePenalty: Math.max(0, Math.round(Number(data.unfreeDefensePenalty) || 0)),
     paradeClickCount: Math.max(0, Math.round(Number(data.paradeClickCount) || 0)),
+  };
+}
+
+function computeTotalInitiative(character, options = {}) {
+  const ini = clamp(Number(options.ini ?? character.ini), 1, 30);
+  const lastRoll = options.lastRoll ?? character.lastRoll;
+  if (lastRoll === null || lastRoll === undefined) {
+    return null;
+  }
+
+  const critBonusRoll = options.critBonusRoll ?? character.critBonusRoll ?? 0;
+  const surprised = options.surprised ?? character.surprised;
+  const surprisePenalty = surprised ? -10 : 0;
+  return lastRoll + ini + critBonusRoll + surprisePenalty;
+}
+
+function normalizeRememberedPixelRef(value) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const deviceId = String(value.systemId || value.deviceId || "").trim();
+  if (!deviceId) {
+    return null;
+  }
+
+  const label = String(value.label || "").trim();
+  return {
+    deviceId,
+    systemId: deviceId,
+    label: label || "Verbunden",
+  };
+}
+
+function normalizeRememberedAssignment(value) {
+  const assignment = value && typeof value === "object" ? value : {};
+  return {
+    single: normalizeRememberedPixelRef(assignment.single),
+    set3: Array.from({ length: 3 }, (_, index) => normalizeRememberedPixelRef(assignment.set3?.[index])),
+  };
+}
+
+function createRememberedPixelRef(pixel) {
+  const deviceId = String(pixel?.systemId || pixel?.device?.id || pixel?.id || "").trim();
+  if (!deviceId) {
+    return null;
+  }
+
+  return {
+    deviceId,
+    systemId: deviceId,
+    label: getConnectedPixelLabel(pixel),
+  };
+}
+
+function captureRememberedPixelsSettings() {
+  const rememberedAssignmentsByCharacterId = {};
+  for (const [characterId, assignment] of Object.entries(pixels.rememberedAssignmentsByCharacterId || {})) {
+    const normalized = normalizeRememberedAssignment(assignment);
+    if (normalized.single || normalized.set3.some((entry) => Boolean(entry))) {
+      rememberedAssignmentsByCharacterId[characterId] = normalized;
+    }
+  }
+
+  const rememberedSharedSet = Array.from({ length: 3 }, (_, index) =>
+    normalizeRememberedPixelRef(pixels.rememberedSharedSet?.[index])
+  );
+
+  return {
+    rememberedAssignmentsByCharacterId,
+    rememberedSharedSet,
   };
 }
 
@@ -2055,6 +2208,7 @@ function persistAppState() {
       simulated: pixels.simulated,
       useForRolls: pixels.useForRolls,
       mode: normalizePixelsMode(pixels.mode),
+      ...captureRememberedPixelsSettings(),
     },
   };
 
@@ -2149,6 +2303,10 @@ function hydrateStateFromStoragePayload(parsedApp) {
             .map((roll) => ({
               id: Number(roll.id),
               lastRoll: roll.lastRoll === null || roll.lastRoll === undefined ? null : Math.round(Number(roll.lastRoll)),
+              critBonusRoll:
+                roll.critBonusRoll === null || roll.critBonusRoll === undefined
+                  ? null
+                  : clamp(Number(roll.critBonusRoll), 1, 6),
               lastPixelsFaces: Array.isArray(roll.lastPixelsFaces)
                 ? roll.lastPixelsFaces
                     .map((face) => Math.round(Number(face) || 0))
@@ -2188,6 +2346,15 @@ function hydrateStateFromStoragePayload(parsedApp) {
   pixels.mode = normalizePixelsMode(pxSettings.mode);
   pixels.assignmentsByCharacterId = {};
   pixels.sharedSet = [null, null, null];
+  pixels.rememberedAssignmentsByCharacterId = Object.fromEntries(
+    Object.entries(pxSettings.rememberedAssignmentsByCharacterId || {}).map(([characterId, assignment]) => [
+      String(characterId),
+      normalizeRememberedAssignment(assignment),
+    ])
+  );
+  pixels.rememberedSharedSet = Array.from({ length: 3 }, (_, index) =>
+    normalizeRememberedPixelRef(pxSettings.rememberedSharedSet?.[index])
+  );
 
   state.combatLog = Array.isArray(parsedApp.combatLog)
     ? parsedApp.combatLog
@@ -2414,6 +2581,7 @@ async function exportFullSnapshotToCsv() {
       useForRolls: pixels.useForRolls,
       mode: normalizePixelsMode(pixels.mode),
       lastStatus: pixels.lastStatus,
+      ...captureRememberedPixelsSettings(),
     },
   };
 
@@ -2468,6 +2636,15 @@ function importFullSnapshotRows(rows) {
     pixels.mode = normalizePixelsMode(px.mode);
     pixels.assignmentsByCharacterId = {};
     pixels.sharedSet = [null, null, null];
+    pixels.rememberedAssignmentsByCharacterId = Object.fromEntries(
+      Object.entries(px.rememberedAssignmentsByCharacterId || {}).map(([characterId, assignment]) => [
+        String(characterId),
+        normalizeRememberedAssignment(assignment),
+      ])
+    );
+    pixels.rememberedSharedSet = Array.from({ length: 3 }, (_, index) =>
+      normalizeRememberedPixelRef(px.rememberedSharedSet?.[index])
+    );
     pixels.lastStatus =
       typeof px.lastStatus === "string" && px.lastStatus.trim()
         ? px.lastStatus
@@ -2677,6 +2854,8 @@ function resetEntireAppState() {
   pixels.mode = PIXELS_MODE.PC_SET_3;
   pixels.assignmentsByCharacterId = {};
   pixels.sharedSet = [null, null, null];
+  pixels.rememberedAssignmentsByCharacterId = {};
+  pixels.rememberedSharedSet = [null, null, null];
   pixels.lastStatus = "Pixels: nicht verbunden (Chromium-Browser mit Web Bluetooth erforderlich).";
 
   localStorage.removeItem(APP_STORAGE_KEY);
@@ -3166,6 +3345,7 @@ function captureTurnOrderUndoSnapshot(reason) {
     characterRollStateById: state.characters.map((character) => ({
       id: character.id,
       lastRoll: character.lastRoll,
+      critBonusRoll: character.critBonusRoll ?? null,
       lastPixelsFaces: Array.isArray(character.lastPixelsFaces) ? [...character.lastPixelsFaces] : null,
       totalInitiative: character.totalInitiative,
       paradeClickCount: Math.max(0, Math.round(Number(character.paradeClickCount) || 0)),
@@ -3241,6 +3421,10 @@ function restoreTurnOrderUndoSnapshot(snapshot) {
             Number(entry.id),
             {
               lastRoll: entry.lastRoll === null || entry.lastRoll === undefined ? null : Number(entry.lastRoll),
+              critBonusRoll:
+                entry.critBonusRoll === null || entry.critBonusRoll === undefined
+                  ? null
+                  : clamp(Number(entry.critBonusRoll), 1, 6),
               lastPixelsFaces: Array.isArray(entry.lastPixelsFaces)
                 ? entry.lastPixelsFaces
                     .map((face) => Math.round(Number(face) || 0))
@@ -3263,6 +3447,7 @@ function restoreTurnOrderUndoSnapshot(snapshot) {
     return {
       ...character,
       lastRoll: rollState.lastRoll,
+      critBonusRoll: rollState.critBonusRoll ?? null,
       lastPixelsFaces: Array.isArray(rollState.lastPixelsFaces) ? [...rollState.lastPixelsFaces] : null,
       totalInitiative: rollState.totalInitiative,
       paradeClickCount: Math.max(0, Math.round(Number(rollState.paradeClickCount) || 0)),
@@ -3400,11 +3585,253 @@ function setPixelsRollDialogStatus(message) {
   }
 }
 
+function setPixelsRollDialogTitle(message) {
+  if (pixelsRollTitleEl) {
+    pixelsRollTitleEl.textContent = message;
+  }
+}
+
+function clearPixelsRollDialogRows() {
+  rollDialogState.rowsByCharacterId.clear();
+  if (pixelsRollListEl) {
+    pixelsRollListEl.innerHTML = "";
+  }
+}
+
+function getRollModeLabel(mode) {
+  if (mode === "manual") return "Manuell";
+  if (mode === "pixels") return "Pixels";
+  if (mode === "auto") return "Auto";
+  return "Übersprungen";
+}
+
+function getCharacterRollMode(character, usePixelsForTurn) {
+  if (!character || character.incapacitated) {
+    return "skip";
+  }
+  if (character.type === "PC" && character.useManualRoll) {
+    return "manual";
+  }
+  if (usePixelsForTurn && character.type === "PC") {
+    return "pixels";
+  }
+  return "auto";
+}
+
+function shouldUseRollDialogForCharacters(characters, usePixelsForTurn) {
+  return characters.some((character) => {
+    const mode = getCharacterRollMode(character, usePixelsForTurn);
+    return mode === "manual" || mode === "pixels";
+  });
+}
+
+function createPixelsRollDialogBadge(text, className = "") {
+  const badge = document.createElement("span");
+  badge.className = `pixels-roll-badge${className ? ` ${className}` : ""}`;
+  badge.textContent = text;
+  return badge;
+}
+
+function createPixelsRollDialogRow(character, mode) {
+  const row = document.createElement("div");
+  row.className = "pixels-roll-row pending";
+
+  const head = document.createElement("div");
+  head.className = "pixels-roll-row-head";
+
+  const nameEl = document.createElement("strong");
+  nameEl.textContent = character.name;
+  head.appendChild(nameEl);
+
+  const badgesEl = document.createElement("div");
+  badgesEl.className = "pixels-roll-row-badges";
+  badgesEl.appendChild(createPixelsRollDialogBadge(getRollModeLabel(mode)));
+  head.appendChild(badgesEl);
+
+  const statusEl = document.createElement("p");
+  statusEl.className = "pixels-roll-row-status";
+  statusEl.textContent =
+    mode === "skip" ? "Wird übersprungen." : mode === "auto" ? "Automatischer Wurf vorbereitet." : "Warte auf Wurf.";
+
+  const detailEl = document.createElement("p");
+  detailEl.className = "pixels-roll-row-detail";
+  detailEl.textContent =
+    mode === "manual"
+      ? "3w6 im Feld eintragen und übernehmen."
+      : mode === "pixels"
+        ? "Warte auf verbundenen Pixels-Wurf."
+        : mode === "auto"
+          ? "Wird automatisch gewürfelt."
+          : "Aktionsunfähig.";
+
+  const controlsEl = document.createElement("div");
+  controlsEl.className = "pixels-roll-row-controls";
+
+  row.appendChild(head);
+  row.appendChild(statusEl);
+  row.appendChild(detailEl);
+  row.appendChild(controlsEl);
+  pixelsRollListEl?.appendChild(row);
+
+  rollDialogState.rowsByCharacterId.set(character.id, {
+    row,
+    badgesEl,
+    statusEl,
+    detailEl,
+    controlsEl,
+  });
+}
+
+function updatePixelsRollDialogRow(characterId, options = {}) {
+  const refs = rollDialogState.rowsByCharacterId.get(characterId);
+  if (!refs) {
+    return;
+  }
+
+  if (options.stateClass) {
+    refs.row.className = `pixels-roll-row ${options.stateClass}`;
+  }
+  if (options.status !== undefined) {
+    refs.statusEl.textContent = options.status;
+  }
+  if (options.detail !== undefined) {
+    refs.detailEl.textContent = options.detail;
+  }
+  if (options.clearControls) {
+    refs.controlsEl.innerHTML = "";
+  }
+  if (Array.isArray(options.resultBadges)) {
+    refs.badgesEl.innerHTML = "";
+    refs.badgesEl.appendChild(createPixelsRollDialogBadge(getRollModeLabel(options.mode || "auto")));
+    for (const badge of options.resultBadges) {
+      refs.badgesEl.appendChild(createPixelsRollDialogBadge(badge.text, badge.className));
+    }
+  }
+}
+
+function updatePixelsRollDialogRowResult(character, rollData, totalInitiative, mode) {
+  const resultBadges = [];
+  if (rollData.total === 18) {
+    resultBadges.push({ text: "Krit. Erfolg", className: "crit-success" });
+  } else if (rollData.total === 3) {
+    resultBadges.push({ text: "Krit. Fehlschlag", className: "crit-failure" });
+  }
+  resultBadges.push({ text: `Ges. ${totalInitiative}`, className: "result" });
+
+  const facesText =
+    Array.isArray(rollData.faces) && rollData.faces.length ? ` [${rollData.faces.join(", ")}]` : "";
+  const critBonusText =
+    Number.isFinite(Number(rollData.critBonusRoll)) && Number(rollData.critBonusRoll) > 0
+      ? `, Krit-W6=${rollData.critBonusRoll}`
+      : "";
+  const sourceText = rollData.source === "pixels-fallback" ? " Pixels-Fallback." : "";
+  updatePixelsRollDialogRow(character.id, {
+    mode,
+    stateClass: "done",
+    status: `Gewürfelt: 3w6=${rollData.total}${facesText}.`,
+    detail: `INI ${character.ini}${character.surprised ? ", Überr. -10" : ""}${critBonusText}, gesamt ${totalInitiative}.${sourceText}`,
+    clearControls: true,
+    resultBadges,
+  });
+}
+
+function describeRollDialogMix(characters, usePixelsForTurn) {
+  let manualCount = 0;
+  let pixelsCount = 0;
+  let autoCount = 0;
+  for (const character of characters) {
+    const mode = getCharacterRollMode(character, usePixelsForTurn);
+    if (mode === "manual") manualCount += 1;
+    else if (mode === "pixels") pixelsCount += 1;
+    else if (mode === "auto") autoCount += 1;
+  }
+
+  const parts = [];
+  if (manualCount > 0) parts.push(`${manualCount} manuell`);
+  if (pixelsCount > 0) parts.push(`${pixelsCount} mit Pixels`);
+  if (autoCount > 0) parts.push(`${autoCount} automatisch`);
+  return parts.length ? parts.join(", ") : "keine Würfe";
+}
+
+function preparePixelsRollDialog(characters, usePixelsForTurn, title = "INI Würfelphase") {
+  if (!shouldUseRollDialogForCharacters(characters, usePixelsForTurn)) {
+    return false;
+  }
+
+  clearPixelsRollDialogRows();
+  setPixelsRollDialogTitle(title);
+  setPixelsRollDialogStatus(`Würfelquellen: ${describeRollDialogMix(characters, usePixelsForTurn)}.`);
+  for (const character of characters) {
+    createPixelsRollDialogRow(character, getCharacterRollMode(character, usePixelsForTurn));
+  }
+  openPixelsRollDialog();
+  return true;
+}
+
+async function requestRollDialogNumberInput(character, options) {
+  const refs = rollDialogState.rowsByCharacterId.get(character.id);
+  if (!refs) {
+    return null;
+  }
+
+  updatePixelsRollDialogRow(character.id, {
+    stateClass: "waiting",
+    status: options.status,
+    detail: options.detail,
+  });
+
+  refs.controlsEl.innerHTML = "";
+  const fieldWrap = document.createElement("label");
+  fieldWrap.className = "pixels-roll-input-wrap";
+  fieldWrap.textContent = options.label;
+
+  const input = document.createElement("input");
+  input.type = "number";
+  input.min = String(options.min);
+  input.max = String(options.max);
+  input.step = "1";
+  input.value = options.initialValue === null || options.initialValue === undefined ? "" : String(options.initialValue);
+  input.placeholder = `${options.min}-${options.max}`;
+  fieldWrap.appendChild(input);
+
+  const submitBtn = document.createElement("button");
+  submitBtn.type = "button";
+  submitBtn.textContent = options.buttonLabel || "Übernehmen";
+
+  refs.controlsEl.appendChild(fieldWrap);
+  refs.controlsEl.appendChild(submitBtn);
+
+  return new Promise((resolve) => {
+    const commit = () => {
+      const value = Math.round(Number(input.value));
+      if (!Number.isFinite(value) || value < options.min || value > options.max) {
+        input.focus();
+        input.select();
+        return;
+      }
+
+      refs.controlsEl.innerHTML = "";
+      resolve(value);
+    };
+
+    submitBtn.addEventListener("click", commit, { once: true });
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        commit();
+      }
+    });
+    requestAnimationFrame(() => {
+      input.focus();
+      input.select();
+    });
+  });
+}
+
 function openPixelsRollDialog() {
   if (!pixelsRollDialogEl || pixelsRollDialogEl.open) {
     return;
   }
-  setPixelsRollDialogStatus("Warte auf Würfe...");
   if (typeof pixelsRollDialogEl.showModal === "function") {
     pixelsRollDialogEl.showModal();
   } else {
@@ -3416,6 +3843,7 @@ function closePixelsRollDialog() {
   if (!pixelsRollDialogEl || !pixelsRollDialogEl.open) {
     return;
   }
+  clearPixelsRollDialogRows();
   pixelsRollDialogEl.close();
 }
 
@@ -3441,6 +3869,13 @@ function ensureCharacterPixelsAssignment(characterId) {
   return existing;
 }
 
+function ensureRememberedCharacterPixelsAssignment(characterId) {
+  const key = String(characterId);
+  const existing = normalizeRememberedAssignment(pixels.rememberedAssignmentsByCharacterId[key]);
+  pixels.rememberedAssignmentsByCharacterId[key] = existing;
+  return existing;
+}
+
 function getConnectedPixelLabel(pixel) {
   if (!pixel) {
     return "nicht verbunden";
@@ -3452,6 +3887,16 @@ function getConnectedPixelLabel(pixel) {
     }
   }
   return "Verbunden";
+}
+
+function getRememberedPixelLabel(rememberedRef) {
+  return rememberedRef?.label ? `${rememberedRef.label} (gemerkt)` : "nicht verbunden";
+}
+
+function rememberPixelsAssignment(characterId, assignment) {
+  const remembered = ensureRememberedCharacterPixelsAssignment(characterId);
+  remembered.single = createRememberedPixelRef(assignment.single);
+  remembered.set3 = Array.from({ length: 3 }, (_, index) => createRememberedPixelRef(assignment.set3?.[index]));
 }
 
 function debugPixels(message, details = null) {
@@ -3599,6 +4044,104 @@ async function ensurePixelsSdkLoaded() {
   return pixels.sdk;
 }
 
+function supportsPixelsAutoReconnect() {
+  return supportsPixels() && typeof navigator?.bluetooth?.getDevices === "function";
+}
+
+function isUsablePixelsObject(pixel) {
+  return Boolean(
+    pixel &&
+      typeof pixel === "object" &&
+      (typeof pixel.addEventListener === "function" || typeof pixel.on === "function" || typeof pixel.onRoll === "function")
+  );
+}
+
+async function reconnectPixelFromRememberedRef(rememberedRef) {
+  const normalizedRef = normalizeRememberedPixelRef(rememberedRef);
+  if (!normalizedRef) {
+    return null;
+  }
+
+  const sdk = await ensurePixelsSdkLoaded();
+  const pixel = typeof sdk?.getPixel === "function" ? await sdk.getPixel(normalizedRef.deviceId) : null;
+  if (!pixel) {
+    return null;
+  }
+
+  if (typeof sdk?.repeatConnect === "function") {
+    await sdk.repeatConnect(pixel);
+  } else if (typeof pixel.connect === "function") {
+    await pixel.connect();
+  }
+
+  return isUsablePixelsObject(pixel) ? pixel : null;
+}
+
+async function reconnectRememberedPixels() {
+  if (pixels.reconnecting || !supportsPixelsAutoReconnect()) {
+    return;
+  }
+
+  const rememberedAssignments = captureRememberedPixelsSettings();
+  const hasRememberedPixels =
+    Object.keys(rememberedAssignments.rememberedAssignmentsByCharacterId).length > 0 ||
+    rememberedAssignments.rememberedSharedSet.some((entry) => Boolean(entry));
+  if (!hasRememberedPixels) {
+    return;
+  }
+
+  pixels.reconnecting = true;
+  pixels.loading = true;
+  updatePixelsStatus("Pixels: versuche gemerkte Würfel automatisch wieder zu verbinden...");
+  updatePixelsControls();
+
+  try {
+    let reconnectedCount = 0;
+
+    for (const [characterId, rememberedAssignment] of Object.entries(rememberedAssignments.rememberedAssignmentsByCharacterId)) {
+      const assignment = ensureCharacterPixelsAssignment(characterId);
+      const remembered = ensureRememberedCharacterPixelsAssignment(characterId);
+
+      if (rememberedAssignment.single) {
+        const pixel = await reconnectPixelFromRememberedRef(rememberedAssignment.single);
+        assignment.single = pixel;
+        remembered.single = normalizeRememberedPixelRef(rememberedAssignment.single);
+        if (pixel) {
+          reconnectedCount += 1;
+        }
+      }
+
+      assignment.set3 = await Promise.all(
+        Array.from({ length: 3 }, async (_, index) => reconnectPixelFromRememberedRef(rememberedAssignment.set3[index]))
+      );
+      remembered.set3 = Array.from({ length: 3 }, (_, index) => normalizeRememberedPixelRef(rememberedAssignment.set3[index]));
+      reconnectedCount += assignment.set3.filter((pixel) => Boolean(pixel)).length;
+    }
+
+    pixels.sharedSet = await Promise.all(
+      Array.from({ length: 3 }, async (_, index) => reconnectPixelFromRememberedRef(rememberedAssignments.rememberedSharedSet[index]))
+    );
+    pixels.rememberedSharedSet = Array.from({ length: 3 }, (_, index) =>
+      normalizeRememberedPixelRef(rememberedAssignments.rememberedSharedSet[index])
+    );
+    reconnectedCount += pixels.sharedSet.filter((pixel) => Boolean(pixel)).length;
+
+    if (reconnectedCount > 0) {
+      updatePixelsStatus(`Pixels: ${reconnectedCount} gemerkte Würfel automatisch wieder verbunden.`);
+    } else {
+      updatePixelsStatus("Pixels: keine gemerkten Würfel automatisch wieder verbunden.");
+    }
+  } catch (error) {
+    const message = error && typeof error.message === "string" ? error.message : String(error);
+    updatePixelsStatus(`Pixels: Auto-Reconnect fehlgeschlagen (${message}).`);
+  } finally {
+    pixels.loading = false;
+    pixels.reconnecting = false;
+    persistAppState();
+    render();
+  }
+}
+
 async function requestAndConnectSinglePixel(waitMessage) {
   if (!supportsPixels()) {
     throw new Error("Web Bluetooth ist in diesem Browser nicht verfügbar");
@@ -3617,6 +4160,70 @@ async function requestAndConnectSinglePixel(waitMessage) {
   }
   debugPixels("Verbundenes Pixel-Objekt", describePixelObject(selectedPixel));
   return selectedPixel;
+}
+
+function getPixelsBlinkColor(sdk) {
+  if (sdk?.Color?.red) {
+    return sdk.Color.red;
+  }
+  if (sdk?.Color?.Red) {
+    return sdk.Color.Red;
+  }
+  throw new Error("keine unterstützte Pixels-Farbe gefunden");
+}
+
+async function blinkPixelsDice(targetPixels, targetLabel) {
+  const connectedPixels = Array.from(
+    new Set((Array.isArray(targetPixels) ? targetPixels : []).filter((pixel) => Boolean(pixel)))
+  );
+  if (!connectedPixels.length) {
+    throw new Error("keine verbundenen Pixels vorhanden");
+  }
+
+  const sdk = await ensurePixelsSdkLoaded();
+  const blinkColor = getPixelsBlinkColor(sdk);
+  let blinkCount = 0;
+
+  for (const pixel of connectedPixels) {
+    if (typeof pixel.blink !== "function") {
+      throw new Error(`${getConnectedPixelLabel(pixel)} unterstützt keine LED-Steuerung`);
+    }
+    await pixel.blink(blinkColor);
+    blinkCount += 1;
+  }
+
+  const suffix = blinkCount === 1 ? "" : "n";
+  updatePixelsStatus(`Pixels: LED-Test für ${targetLabel} auf ${blinkCount} Würfel${suffix} gestartet.`);
+  logEvent(`Pixels: LED-Test für ${targetLabel} auf ${blinkCount} Würfel${suffix} gestartet.`);
+}
+
+async function runPixelsLedTest(targetPixels, targetLabel) {
+  pixels.loading = true;
+  updatePixelsControls();
+  renderPixelsSettingsDialog();
+  try {
+    await blinkPixelsDice(targetPixels, targetLabel);
+  } catch (error) {
+    const message = error && typeof error.message === "string" ? error.message : String(error);
+    updatePixelsStatus(`Pixels: LED-Test fehlgeschlagen (${message}).`);
+    logEvent(`Pixels-LED-Test fehlgeschlagen: ${message}.`);
+  } finally {
+    pixels.loading = false;
+    updatePixelsControls();
+    renderPixelsSettingsDialog();
+  }
+}
+
+function appendPixelsLedTestButton(actionsEl, targetPixels, targetLabel) {
+  const ledBtn = document.createElement("button");
+  ledBtn.type = "button";
+  ledBtn.className = "ghost";
+  ledBtn.textContent = "LED testen";
+  ledBtn.disabled = pixels.loading || !targetPixels.some((pixel) => Boolean(pixel));
+  ledBtn.addEventListener("click", async () => {
+    await runPixelsLedTest(targetPixels, targetLabel);
+  });
+  actionsEl.appendChild(ledBtn);
 }
 
 function uniquePixelsFromAssignments() {
@@ -3657,6 +4264,8 @@ async function disconnectAllPixels() {
   }
   pixels.assignmentsByCharacterId = {};
   pixels.sharedSet = [null, null, null];
+  pixels.rememberedAssignmentsByCharacterId = {};
+  pixels.rememberedSharedSet = [null, null, null];
   if (!pixels.simulated) {
     pixels.useForRolls = false;
   }
@@ -3684,7 +4293,9 @@ async function connectSet3ForCharacter(character) {
     const pixel = await requestAndConnectSinglePixel(
       `Pixels: SC ${character.name}, Set-Würfel ${nextIndex + 1}/3 auswählen...`
     );
+    assignment.single = null;
     assignment.set3[nextIndex] = pixel;
+    rememberPixelsAssignment(character.id, assignment);
     const remainingIndex = getFirstMissingPixelIndex(assignment.set3);
     if (remainingIndex < 0) {
       logEvent(`Pixels: Set (3) für ${character.name} vollständig verbunden.`);
@@ -3716,7 +4327,9 @@ async function connectSingleForCharacter(character) {
   pixels.loading = true;
   updatePixelsControls();
   try {
+    assignment.set3 = [null, null, null];
     assignment.single = await requestAndConnectSinglePixel(`Pixels: SC ${character.name}, Einzelwürfel auswählen...`);
+    rememberPixelsAssignment(character.id, assignment);
     logEvent(`Pixels: Einzelwürfel für ${character.name} verbunden.`);
     updatePixelsStatus(`Pixels: Einzelwürfel für ${character.name} verbunden.`);
     persistAppState();
@@ -3746,6 +4359,7 @@ async function connectSharedSet3() {
   try {
     const pixel = await requestAndConnectSinglePixel(`Pixels: Gemeinsames Set, Würfel ${nextIndex + 1}/3 auswählen...`);
     pixels.sharedSet[nextIndex] = pixel;
+    pixels.rememberedSharedSet[nextIndex] = createRememberedPixelRef(pixel);
     const remainingIndex = getFirstMissingPixelIndex(pixels.sharedSet);
     if (remainingIndex < 0) {
       logEvent("Pixels: Gemeinsames 3er-Set vollständig verbunden.");
@@ -3774,6 +4388,7 @@ function renderPixelsAssignmentRow(character) {
     return;
   }
   const assignment = ensureCharacterPixelsAssignment(character.id);
+  const rememberedAssignment = ensureRememberedCharacterPixelsAssignment(character.id);
   const row = document.createElement("div");
   row.className = "pixels-assignment-row";
 
@@ -3790,7 +4405,9 @@ function renderPixelsAssignmentRow(character) {
   if (pixels.mode === PIXELS_MODE.PC_SINGLE_3X) {
     const status = document.createElement("span");
     status.className = "hint";
-    status.textContent = `Pixel: ${getConnectedPixelLabel(assignment.single)}`;
+    status.textContent = `Pixel: ${
+      assignment.single ? getConnectedPixelLabel(assignment.single) : getRememberedPixelLabel(rememberedAssignment.single)
+    }`;
     row.appendChild(status);
 
     const connectBtn = document.createElement("button");
@@ -3803,13 +4420,16 @@ function renderPixelsAssignmentRow(character) {
     });
     actions.appendChild(connectBtn);
 
+    appendPixelsLedTestButton(actions, assignment.single ? [assignment.single] : [], character.name);
+
     const clearBtn = document.createElement("button");
     clearBtn.type = "button";
     clearBtn.className = "ghost";
     clearBtn.textContent = "Zuweisung löschen";
-    clearBtn.disabled = pixels.loading || !assignment.single;
+    clearBtn.disabled = pixels.loading || (!assignment.single && !rememberedAssignment.single);
     clearBtn.addEventListener("click", () => {
       assignment.single = null;
+      rememberedAssignment.single = null;
       persistAppState();
       updatePixelsControls();
       renderPixelsSettingsDialog();
@@ -3820,7 +4440,12 @@ function renderPixelsAssignmentRow(character) {
     return;
   }
 
-  const labels = assignment.set3.map((pixel, index) => `W${index + 1}: ${getConnectedPixelLabel(pixel)}`).join(" | ");
+  const labels = assignment.set3
+    .map((pixel, index) => {
+      const rememberedRef = rememberedAssignment.set3[index];
+      return `W${index + 1}: ${pixel ? getConnectedPixelLabel(pixel) : getRememberedPixelLabel(rememberedRef)}`;
+    })
+    .join(" | ");
   const status = document.createElement("span");
   status.className = "hint";
   status.textContent = labels;
@@ -3837,13 +4462,17 @@ function renderPixelsAssignmentRow(character) {
   });
   actions.appendChild(connectBtn);
 
+  appendPixelsLedTestButton(actions, assignment.set3, character.name);
+
   const clearBtn = document.createElement("button");
   clearBtn.type = "button";
   clearBtn.className = "ghost";
   clearBtn.textContent = "Zuweisung löschen";
-  clearBtn.disabled = pixels.loading || !assignment.set3.some((pixel) => Boolean(pixel));
+  clearBtn.disabled =
+    pixels.loading || (!assignment.set3.some((pixel) => Boolean(pixel)) && !rememberedAssignment.set3.some((entry) => Boolean(entry)));
   clearBtn.addEventListener("click", () => {
     assignment.set3 = [null, null, null];
+    rememberedAssignment.set3 = [null, null, null];
     persistAppState();
     updatePixelsControls();
     renderPixelsSettingsDialog();
@@ -3863,8 +4492,20 @@ function renderPixelsSettingsDialog() {
       delete pixels.assignmentsByCharacterId[key];
     }
   }
+  for (const key of Object.keys(pixels.rememberedAssignmentsByCharacterId)) {
+    if (!validPcIds.has(key)) {
+      delete pixels.rememberedAssignmentsByCharacterId[key];
+    }
+  }
   if (!Array.isArray(pixels.sharedSet) || pixels.sharedSet.length !== 3) {
     pixels.sharedSet = [pixels.sharedSet?.[0] ?? null, pixels.sharedSet?.[1] ?? null, pixels.sharedSet?.[2] ?? null];
+  }
+  if (!Array.isArray(pixels.rememberedSharedSet) || pixels.rememberedSharedSet.length !== 3) {
+    pixels.rememberedSharedSet = [
+      normalizeRememberedPixelRef(pixels.rememberedSharedSet?.[0]),
+      normalizeRememberedPixelRef(pixels.rememberedSharedSet?.[1]),
+      normalizeRememberedPixelRef(pixels.rememberedSharedSet?.[2]),
+    ];
   }
   if (pixelsModeSelectEl) {
     pixelsModeSelectEl.value = normalizePixelsMode(pixels.mode);
@@ -3894,7 +4535,11 @@ function renderPixelsSettingsDialog() {
 
     const status = document.createElement("span");
     status.className = "hint";
-    status.textContent = pixels.sharedSet.map((pixel, index) => `W${index + 1}: ${getConnectedPixelLabel(pixel)}`).join(" | ");
+    status.textContent = pixels.sharedSet
+      .map((pixel, index) =>
+        `W${index + 1}: ${pixel ? getConnectedPixelLabel(pixel) : getRememberedPixelLabel(pixels.rememberedSharedSet[index])}`
+      )
+      .join(" | ");
     row.appendChild(status);
 
     const orderHint = document.createElement("span");
@@ -3915,13 +4560,17 @@ function renderPixelsSettingsDialog() {
     });
     actions.appendChild(connectBtn);
 
+    appendPixelsLedTestButton(actions, pixels.sharedSet, "Gemeinsames Set");
+
     const clearBtn = document.createElement("button");
     clearBtn.type = "button";
     clearBtn.className = "ghost";
     clearBtn.textContent = "Set löschen";
-    clearBtn.disabled = pixels.loading || !pixels.sharedSet.some((pixel) => Boolean(pixel));
+    clearBtn.disabled =
+      pixels.loading || (!pixels.sharedSet.some((pixel) => Boolean(pixel)) && !pixels.rememberedSharedSet.some((entry) => Boolean(entry)));
     clearBtn.addEventListener("click", () => {
       pixels.sharedSet = [null, null, null];
+      pixels.rememberedSharedSet = [null, null, null];
       persistAppState();
       updatePixelsControls();
       renderPixelsSettingsDialog();
@@ -4140,6 +4789,89 @@ function hasThreeDistinctPixels(rollPixels) {
   return new Set(rollPixels.slice(0, 3)).size === 3;
 }
 
+function promptForRollValue(message, initialValue, min, max, fallbackValue) {
+  if (typeof window === "undefined" || typeof window.prompt !== "function") {
+    return fallbackValue;
+  }
+
+  while (true) {
+    const rawValue = window.prompt(message, initialValue === null || initialValue === undefined ? "" : String(initialValue));
+    if (rawValue === null) {
+      return fallbackValue;
+    }
+
+    const parsedValue = Math.round(Number(rawValue));
+    if (Number.isFinite(parsedValue) && parsedValue >= min && parsedValue <= max) {
+      return parsedValue;
+    }
+  }
+}
+
+async function requestManualRollTotal(character) {
+  if (rollDialogState.rowsByCharacterId.has(character.id)) {
+    return requestRollDialogNumberInput(character, {
+      status: "Manueller INI-Wurf ausstehend.",
+      detail: "3w6 manuell eintragen und übernehmen.",
+      label: "3w6",
+      min: 3,
+      max: 18,
+      initialValue: character.manualRoll ?? "",
+      buttonLabel: "Wurf übernehmen",
+    });
+  }
+
+  return promptForRollValue(`Manueller 3w6-Wurf für ${character.name} eingeben (3-18).`, character.manualRoll ?? "", 3, 18, 10);
+}
+
+async function requestManualCriticalBonusRoll(character) {
+  if (rollDialogState.rowsByCharacterId.has(character.id)) {
+    return requestRollDialogNumberInput(character, {
+      status: "Kritischer Erfolg: zusätzlicher W6 ausstehend.",
+      detail: "Zusätzlichen W6 für die Initiative eintragen.",
+      label: "Krit-W6",
+      min: 1,
+      max: 6,
+      initialValue: 1,
+      buttonLabel: "Krit-W6 übernehmen",
+    });
+  }
+
+  return promptForRollValue(
+    `Kritischer Erfolg für ${character.name}: zusätzlichen W6 für Initiative eingeben (1-6).`,
+    1,
+    1,
+    6,
+    d6()
+  );
+}
+
+async function roll1d6WithPixels(characterName, rollPixels) {
+  if (pixels.simulated) {
+    const statusMessage = `Warte auf Krit-W6 von ${characterName} (simuliert).`;
+    setPixelsRollDialogStatus(statusMessage);
+    updatePixelsStatus(`Pixels (Sim): ${statusMessage}`);
+    await delay(220);
+    return {
+      face: d6(),
+      simulated: true,
+    };
+  }
+
+  const pixel = Array.isArray(rollPixels) ? rollPixels.find((item) => Boolean(item)) : null;
+  if (!pixel) {
+    throw new Error("kein Pixel für Krit-W6 zugewiesen");
+  }
+
+  const dieLabel = getConnectedPixelLabel(pixel);
+  const statusMessage = `Warte auf Krit-W6 von ${characterName} (${dieLabel}).`;
+  setPixelsRollDialogStatus(statusMessage);
+  updatePixelsStatus(`Pixels: ${statusMessage}`);
+  return {
+    face: await waitForSinglePixelsD6(pixel),
+    simulated: false,
+  };
+}
+
 async function roll3d6WithPixels(characterName, rollPixels) {
   if (pixels.simulated) {
     const faces = [];
@@ -4204,9 +4936,16 @@ async function roll3d6WithPixels(characterName, rollPixels) {
 }
 
 async function resolveCharacterRoll(character, usePixelsForTurn) {
-  const usesManualRoll = character.type === "PC" && character.useManualRoll && character.manualRoll !== null;
+  const usesManualRoll = character.type === "PC" && character.useManualRoll;
   if (usesManualRoll) {
-    return { total: clamp(character.manualRoll, 3, 18), source: "manual", faces: null };
+    const total = clamp(await requestManualRollTotal(character), 3, 18);
+    return {
+      total,
+      source: "manual",
+      faces: null,
+      critBonusRoll: total === 18 ? await requestManualCriticalBonusRoll(character) : null,
+      manualRollValue: total,
+    };
   }
 
   const canUsePixelsForCharacter = usePixelsForTurn && character.type === "PC";
@@ -4214,25 +4953,50 @@ async function resolveCharacterRoll(character, usePixelsForTurn) {
     try {
       const assignedPixels = getRollPixelsForCharacter(character.id);
       const pixelsRoll = await roll3d6WithPixels(character.name, assignedPixels);
+      const critBonusPixelsRoll = pixelsRoll.total === 18 ? await roll1d6WithPixels(character.name, assignedPixels) : null;
       return {
         total: pixelsRoll.total,
         source: pixelsRoll.simulated ? "pixels-sim" : "pixels",
         faces: pixelsRoll.faces,
+        critBonusRoll: critBonusPixelsRoll?.face ?? null,
         error: null,
       };
     } catch (error) {
       const message = error && typeof error.message === "string" ? error.message : String(error);
       updatePixelsStatus(`Pixels: Wurf fehlgeschlagen (${message}), nutze Zufallswürfe.`);
       logEvent(`Pixels-Fallback für ${character.name}: ${message}.`);
-      return { total: roll3d6(), source: "pixels-fallback", faces: null, error: message };
+      const total = roll3d6();
+      return {
+        total,
+        source: "pixels-fallback",
+        faces: null,
+        critBonusRoll: total === 18 ? d6() : null,
+        error: message,
+      };
     }
   }
 
-  return { total: roll3d6(), source: "random", faces: null, error: null };
+  const total = roll3d6();
+  return { total, source: "random", faces: null, critBonusRoll: total === 18 ? d6() : null, error: null };
 }
 
 function registerServiceWorker() {
   if (typeof window === "undefined" || !("serviceWorker" in navigator)) {
+    return;
+  }
+
+  const isLocalhost =
+    window.location.hostname === "localhost" ||
+    window.location.hostname === "127.0.0.1" ||
+    window.location.hostname === "[::1]";
+
+  if (isLocalhost) {
+    window.addEventListener("load", () => {
+      navigator.serviceWorker
+        .getRegistrations()
+        .then((registrations) => Promise.all(registrations.map((registration) => registration.unregister())))
+        .catch(() => {});
+    });
     return;
   }
 
@@ -4249,3 +5013,4 @@ applyUiSettings(state.uiSettings);
 updateVersionBadge();
 initSettingsMenusHoverBehavior();
 render();
+void reconnectRememberedPixels();

@@ -1,4 +1,4 @@
-const CACHE_NAME = "fatevi-initiative-v2";
+const CACHE_NAME = "fatevi-initiative-v3";
 const APP_SHELL_FILES = [
   "./",
   "./index.html",
