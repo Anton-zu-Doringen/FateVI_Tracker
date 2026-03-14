@@ -1,0 +1,53 @@
+1. Erstelle einen Initiative-Tracker als Web-App. Er soll die Initiative für beliebig viele NSC und SC verwalten. Die Initiative besteht aus 3w6 plus einem Initiativewert (INI) zwischen 1 und 30. Jeder Charakter mit einer Initiative über 30 erhält eine Bonusaktion (z. B. erscheint der Charakter zweimal im Tracker). Alle Charaktere brauchen eine klickbare Option für Überraschung. Überraschung gibt -10 auf die Initiative.
+
+2. Füge Runden-Navigation hinzu und die Möglichkeit, für SC einen manuellen Würfelwurf einzutragen. Außerdem soll die Reihenfolge im Zug vom Benutzer umsortiert werden können, und es soll eine visuelle Unterscheidung zwischen SC und NSC geben.
+
+3. Füge deine letzten Vorschläge hinzu. Ergänze außerdem die Möglichkeit, SC als Gruppe mit Gruppennamen zu speichern.
+
+4. Die Initiative muss jede Kampfrunde neu gewürfelt werden.
+
+5. Setze Bonusaktionen nicht ans Ende. Stelle alle Aktionen eines Charakters direkt hintereinander dar. Wenn ein Charakter dreimal eine 1 würfelt, markiere die Aktion als kritischen Fehlschlag. Wenn ein Charakter dreimal eine 6 würfelt, markiere die Aktion als kritischen Erfolg. Die UI-Elemente zum Hinzufügen von Charakteren und Speichern der Gruppe sollen einklappbar sein.
+
+6. Erstelle in der INI-Reihenfolge einen Button zum Durchklicken der Aktionen der Charaktere ("Nächster Charakter"), wobei bereits genutzte Aktionen ausgegraut werden.
+
+7. Füge in der INI-Reihenfolge einen Button hinzu, der sie leert ("Kampf beenden").
+
+8. Ziehe bei Bonusaktionen nicht 30 von der Initiative ab.
+
+9. Kannst du dieses Projekt in mein fateVI-tools-Git-Repository verschieben?
+
+10. Bitte exportiere alle meine Prompts in eine Textdatei in meinem Home-Verzeichnis.
+
+11. Füge die Datei mit den Prompts zum Git-Repository hinzu und aktualisiere sie bei jedem neuen Prompt.
+
+12. Committe die Dateien jetzt.
+
+13. Füge den Charakteren einen Button "Status: Benommen" hinzu. Beim Klicken soll im Turn-Order-Eintrag eine Warnung "Status: Benommen!" bis Ende der nächsten Runde erscheinen. Wenn der Button geklickt wird, während der Charakter noch benommen ist, verlängert sich die Dauer um eine Runde.
+
+14. Mache den Charakter-Bereich einklappbar. Ersetze im Charaktereintrag den Entfernen-Button durch ein "x" zum Löschen und ein "-" zum Minimieren.
+
+15. Füge ein Zwei-Spalten-Design hinzu, wenn die Fenstergröße es erlaubt. Die linke Spalte soll "Charakter hinzufügen", "Gruppen" und den "Charaktere"-Bereich enthalten, die rechte Spalte den "INI-Reihenfolge"-Bereich.
+
+16. Entferne den "Vorherige Runde"-Button aus der INI-Reihenfolge und füge stattdessen darunter ein scrollbares Kampf-Log hinzu. Schreibe alle relevanten Daten ins Log (z. B. Charakteraktionen, Status: Benommen, gewürfelte Initiativen usw.).
+
+17. Füge dem Kampf-Log einen "Log löschen"-Button hinzu. Der "Status: Benommen"-Button soll im Bereich INI-Reihenfolge erscheinen, nicht im Charakter-Bereich.
+
+18. Die App wendet "Status: Benommen" fälschlich an, ohne dass ich den Button drücke.
+
+19. Pushe alle Änderungen in Git.
+
+20. Aktionen und Bonusaktionen in der INI-Reihenfolge brauchen zu viel Platz. Wenn ein Charakter eine Bonusaktion hat, setze die Bonusaktion hinter die Hauptaktion und mache die Aktionsanzeigen kompakter.
+
+21. Ich habe meinen ChatGPT-Plan aktualisiert. Aktualisiere die Token-Anzahl.
+
+22. Mache die Anzeigen für Haupt- und Bonusaktionen im Turn-Tracker größer und zeige den Initiativewert nur bei der Hauptaktion.
+
+23. Füge bei Charakteren ein Dropdown "Spezielle Fähigkeiten" hinzu. Es soll enthalten: INI Archer, INI Nimble, INI Boxer, INI Pacifist, INI Horsemen. Wenn eine Fähigkeit gewählt ist, füge dem Charakter in der INI-Reihenfolge einen Button hinzu, um diese Fähigkeit nur für die aktuelle Runde zu aktivieren. Jeder Charakter mit aktivierter Fähigkeit erhält +3 auf die Initiative.
+
+24. Entferne die Buttons "Initiative würfeln" und "Runde leeren" bei den Charakteren, da beide redundant sind. Die Funktionalität ist bereits durch "Nächste KR" und "Kampf beenden" abgedeckt.
+
+25. Füge bei Charakteren einen Button hinzu, um die aktuelle Gruppe zu leeren.
+
+26. Kannst du die Nutzung von Pixels Dice integrieren? Siehe https://github.com/GameWithPixels
+
+27. Committe die Änderungen.

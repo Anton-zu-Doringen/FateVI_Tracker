@@ -1,0 +1,448 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#1e1a14" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="Fate VI Tracker" />
+    <meta name="format-detection" content="telephone=no" />
+    <title>Initiative-Reihenfolge</title>
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700&family=Barlow:wght@400;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="app-header">
+        <h1>Fate VI Initiative und Verwundungen</h1>
+        <div class="header-action-buttons">
+          <button id="header-undo" class="ghost" type="button" aria-label="Rückgängig" title="Rückgängig">↶</button>
+          <button id="header-redo" class="ghost" type="button" aria-label="Wiederholen" title="Wiederholen">↷</button>
+        </div>
+        <details id="header-settings-menu" class="settings-menu">
+          <summary class="settings-trigger" aria-label="Einstellungen" title="Einstellungen">⚙</summary>
+          <div class="settings-dropdown header-settings-dropdown">
+            <details class="settings-submenu">
+              <summary>Hilfe</summary>
+              <div class="settings-submenu-body">
+                <p class="hint">
+                  Gegner-CSV (UTF-8): Spalten <code>Name,INI,Charaktervorteil,Anzahl</code>.
+                  <code>Charaktervorteil</code> und <code>Anzahl</code> sind optional
+                  (Standard: leer und 1). Beispiel:
+                  <code>Bandit,12,,3</code>.
+                </p>
+                <p class="hint">
+                  Gruppen-CSV (SC, UTF-8): Spalten <code>Name,INI,Charaktervorteil,ManuellerWurf</code>.
+                  <code>Charaktervorteil</code> und <code>ManuellerWurf</code> sind optional.
+                  Beispiel: <code>Aria,13,INI Flink,</code>.
+                </p>
+              </div>
+            </details>
+
+            <label class="settings-option">
+              App-Zoom
+              <input id="font-size-slider" type="range" min="70" max="130" step="1" value="100" />
+            </label>
+            <label class="settings-option checkbox-option">
+              Einspaltige Ansicht
+              <input id="force-one-column" type="checkbox" />
+            </label>
+
+            <button id="reset-app-state" class="ghost" type="button">App resetten</button>
+
+            <details class="settings-submenu" open>
+              <summary>Pixels</summary>
+              <div class="settings-submenu-body">
+                <button id="open-pixels-settings" class="ghost" type="button">Pixels Einstellungen</button>
+                <p id="pixels-status" class="hint">Pixels: nicht verbunden (Chromium-Browser mit Web Bluetooth erforderlich).</p>
+              </div>
+            </details>
+          </div>
+        </details>
+        <span id="app-version" class="version-badge"></span>
+      </header>
+      <div class="layout-grid">
+        <div class="left-column">
+          <details id="panel-add" class="panel collapsible left-panel">
+            <summary class="collapse-head">Charakter hinzufügen</summary>
+            <div class="collapse-body">
+              <form id="add-form" class="add-form">
+                <label>
+                  Name
+                  <input id="name" name="name" type="text" maxlength="40" required placeholder="z. B. Hauptmann der Wache" />
+                </label>
+
+                <label>
+                  Typ
+                  <select id="type" name="type">
+                    <option value="PC">SC</option>
+                    <option value="NPC">NSC</option>
+                  </select>
+                </label>
+
+                <label>
+                  INI (1-30)
+                  <input id="ini" name="ini" type="number" min="1" max="30" value="10" required />
+                </label>
+
+                <label>
+                  Ch. Vorteil
+                  <select id="special-ability" name="specialAbility">
+                    <option value="">Keiner</option>
+                    <option value="INI Archer">INI Schützen</option>
+                    <option value="INI Nimble">INI Flink</option>
+                    <option value="INI Boxer">INI Straßenschläger</option>
+                    <option value="INI Pacifist">INI Pazifist</option>
+                    <option value="INI Horsemen">INI Reiter</option>
+                  </select>
+                </label>
+
+                <button type="submit">Hinzuf.</button>
+              </form>
+            </div>
+          </details>
+
+          <details id="panel-roster" class="panel collapsible left-panel" open>
+            <summary class="collapse-head">Charaktere/NSC</summary>
+            <div class="collapse-body">
+              <div class="panel-head panel-head-right">
+                <div class="roster-head-controls">
+                  <label class="panel-toggle">
+                    <input id="surprise-all-pc" type="checkbox" />
+                    <span>Alle SC überr.</span>
+                  </label>
+                  <label class="panel-toggle">
+                    <input id="surprise-all-npc" type="checkbox" />
+                    <span>Alle NSC überr.</span>
+                  </label>
+                </div>
+                <div class="actions">
+                  <details id="character-settings-menu" class="settings-menu">
+                    <summary class="settings-trigger" aria-label="Charakter-Einstellungen" title="Charakter-Einstellungen">⚙</summary>
+                    <div class="settings-dropdown">
+                      <button id="remove-all-characters" class="ghost" type="button">Alle entfernen</button>
+                      <button id="remove-pc-characters" class="ghost" type="button">SC entfernen</button>
+                      <button id="remove-npc-characters" class="ghost" type="button">NSC entfernen</button>
+                    </div>
+                  </details>
+                </div>
+              </div>
+              <div id="roster" class="roster" aria-live="polite"></div>
+            </div>
+          </details>
+        </div>
+
+        <div class="right-column">
+          <details id="panel-loadsave" class="panel collapsible left-panel">
+            <summary class="collapse-head">Import/Export</summary>
+            <div class="collapse-body">
+              <div class="settings-submenu-body">
+                <button id="save-full-snapshot-csv" type="button">Vollsnapshot speichern</button>
+                <label>
+                  Vollsnapshot laden
+                  <input id="load-full-snapshot-csv" type="file" accept=".csv,text/csv" />
+                </label>
+                <button id="save-party-csv" type="button">Gruppe als CSV speichern</button>
+                <label>
+                  Gruppen-CSV laden
+                  <input id="load-party-csv" type="file" accept=".csv,text/csv" />
+                </label>
+                <button id="save-enemy-csv" type="button">Gegner als CSV speichern</button>
+                <label>
+                  Gegner-CSV laden
+                  <input id="enemy-group-csv" type="file" accept=".csv,text/csv" />
+                </label>
+              </div>
+            </div>
+          </details>
+
+          <details id="panel-ini" class="panel collapsible turn-order-panel" open>
+            <summary class="collapse-head">INI Reihenfolge</summary>
+            <div class="collapse-body">
+              <div class="panel-head panel-head-right">
+                <div class="actions">
+                  <details id="turn-order-settings-menu" class="settings-menu">
+                    <summary class="settings-trigger" aria-label="INI-Reihenfolge-Einstellungen" title="INI-Reihenfolge-Einstellungen">⚙</summary>
+                    <div class="settings-dropdown">
+                      <button id="end-combat" class="ghost" type="button">Kampf beenden</button>
+                    </div>
+                  </details>
+                </div>
+              </div>
+              <p id="round-status" class="round-status">Kampfrunde: -</p>
+              <ol id="tracker" class="tracker" aria-live="polite"></ol>
+              <div class="turn-order-footer">
+                <button id="activate-character-up" type="button" title="Vorherigen Charakter aktivieren">Vorheriger Char.</button>
+                <button id="activate-character-down" type="button" title="Nächsten Charakter aktivieren">Nächster Char.</button>
+                <button id="next-turn" type="button">Nächste KR</button>
+              </div>
+            </div>
+          </details>
+
+          <details id="panel-log" class="panel collapsible combat-log-panel" open>
+            <summary class="collapse-head">Logs</summary>
+            <div class="collapse-body combat-log-body">
+              <div class="panel-head panel-head-right">
+                <div class="actions">
+                  <details id="combat-log-settings-menu" class="settings-menu">
+                    <summary class="settings-trigger" aria-label="Log-Einstellungen" title="Log-Einstellungen">⚙</summary>
+                    <div class="settings-dropdown">
+                      <button id="clear-log" class="ghost" type="button">Log löschen</button>
+                    </div>
+                  </details>
+                </div>
+              </div>
+              <div id="combat-log" class="combat-log" aria-live="polite"></div>
+            </div>
+          </details>
+
+        </div>
+      </div>
+    </main>
+
+    <template id="character-template">
+      <article class="character-card">
+        <div class="character-topline">
+          <h3 class="character-name"></h3>
+          <span class="type-badge"></span>
+
+          <label class="panel-toggle">
+            <input class="incapacitated-input" type="checkbox" />
+            <span>Akt.-unf.</span>
+          </label>
+
+          <label class="panel-toggle">
+            <input class="surprise-input" type="checkbox" />
+            <span>Überr.</span>
+          </label>
+
+          <div class="entry-actions">
+            <button class="edit-btn" type="button" title="Bearbeiten">⚙</button>
+            <button class="minimize-btn" type="button" title="Minimieren">-</button>
+            <button class="remove-btn" type="button" title="Entfernen">x</button>
+          </div>
+        </div>
+
+        <p class="character-meta"></p>
+
+        <div class="character-controls">
+          <label class="manual-roll" hidden>
+            Wurf:
+            <input class="manual-roll-input" type="number" min="3" max="18" step="1" placeholder="auto" />
+          </label>
+        </div>
+
+        <details class="damage-monitor">
+          <summary class="damage-monitor-summary">Schadensmonitor</summary>
+          <div class="damage-monitor-wrap">
+            <table class="damage-monitor-table">
+              <colgroup>
+                <col class="damage-label-col" />
+                <col class="damage-data-col" />
+                <col class="damage-data-col" />
+                <col class="damage-data-col" />
+                <col class="damage-data-col" />
+                <col class="damage-data-col" />
+                <col class="damage-data-col" />
+                <col class="damage-data-col" />
+                <col class="damage-data-col" />
+                <col class="damage-data-col" />
+                <col class="damage-data-col" />
+                <col class="damage-data-col" />
+                <col class="damage-data-col" />
+                <col class="damage-data-col" />
+                <col class="damage-data-col" />
+                <col class="damage-data-col" />
+                <col class="damage-data-col" />
+              </colgroup>
+              <thead>
+                <tr>
+                  <th></th>
+                  <th colspan="5">Kratzer</th>
+                  <th colspan="3">LW</th>
+                  <th colspan="3">MW</th>
+                  <th colspan="3">SW</th>
+                  <th class="damage-single-head">TW</th>
+                  <th class="damage-single-head">T†</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <th>Wunden</th>
+                  <td></td>
+                  <td><input class="damage-wound-input" type="checkbox" data-damage-index="1" /></td>
+                  <td><input class="damage-wound-input" type="checkbox" data-damage-index="2" /></td>
+                  <td><input class="damage-wound-input" type="checkbox" data-damage-index="3" /></td>
+                  <td><input class="damage-wound-input" type="checkbox" data-damage-index="4" /></td>
+                  <td><input class="damage-wound-input" type="checkbox" data-damage-index="5" /></td>
+                  <td><input class="damage-wound-input" type="checkbox" data-damage-index="6" /></td>
+                  <td><input class="damage-wound-input" type="checkbox" data-damage-index="7" /></td>
+                  <td><input class="damage-wound-input" type="checkbox" data-damage-index="8" /></td>
+                  <td><input class="damage-wound-input" type="checkbox" data-damage-index="9" /></td>
+                  <td><input class="damage-wound-input" type="checkbox" data-damage-index="10" /></td>
+                  <td><input class="damage-wound-input" type="checkbox" data-damage-index="11" /></td>
+                  <td><input class="damage-wound-input" type="checkbox" data-damage-index="12" /></td>
+                  <td><input class="damage-wound-input" type="checkbox" data-damage-index="13" /></td>
+                  <td><input class="damage-wound-input" type="checkbox" data-damage-index="14" /></td>
+                  <td><input class="damage-wound-input" type="checkbox" data-damage-index="15" /></td>
+                </tr>
+                <tr>
+                  <th>QM</th>
+                  <td>-</td>
+                  <td>-</td>
+                  <td>-</td>
+                  <td>-</td>
+                  <td>-</td>
+                  <td>-</td>
+                  <td>-</td>
+                  <td>-1</td>
+                  <td>-2</td>
+                  <td>-3</td>
+                  <td>-4</td>
+                  <td>-7</td>
+                  <td>-8</td>
+                  <td>-9</td>
+                  <td>-12</td>
+                  <td>-15</td>
+                </tr>
+                <tr>
+                  <th>BEW</th>
+                  <td>-</td>
+                  <td>-</td>
+                  <td>-</td>
+                  <td>-</td>
+                  <td>-</td>
+                  <td>-</td>
+                  <td>-</td>
+                  <td>-</td>
+                  <td>-</td>
+                  <td>-</td>
+                  <td>-1</td>
+                  <td>-1</td>
+                  <td>-2</td>
+                  <td>-3</td>
+                  <td>-5</td>
+                  <td>-7</td>
+                </tr>
+                <tr>
+                  <th>Aktionsunfähig</th>
+                  <td colspan="5">(25)¹</td>
+                  <td colspan="3">30</td>
+                  <td colspan="3">35</td>
+                  <td colspan="3">40</td>
+                  <td>A</td>
+                  <td>A</td>
+                </tr>
+              </tbody>
+            </table>
+            <p class="damage-monitor-note">
+              Anmerkungen: ¹ Nur bei Kopftreffern, † der Charakter stirbt am Ende der nächsten KR.
+            </p>
+          </div>
+        </details>
+      </article>
+    </template>
+
+    <dialog id="edit-character-dialog" class="edit-character-dialog">
+      <form id="edit-character-form" method="dialog" class="edit-character-form">
+        <h3 id="edit-character-title">Charakter bearbeiten</h3>
+        <label>
+          Name
+          <input id="edit-name" name="name" type="text" maxlength="40" required />
+        </label>
+        <label>
+          Typ
+          <select id="edit-type" name="type">
+            <option value="PC">SC</option>
+            <option value="NPC">NSC</option>
+          </select>
+        </label>
+        <label>
+          INI
+          <input id="edit-ini" name="ini" type="number" min="1" max="30" required />
+        </label>
+        <label>
+          Ch. Vorteil
+          <select id="edit-special-ability" name="specialAbility">
+            <option value="">Keiner</option>
+            <option value="INI Archer">INI Schützen</option>
+            <option value="INI Nimble">INI Flink</option>
+            <option value="INI Boxer">INI Straßenschläger</option>
+            <option value="INI Pacifist">INI Pazifist</option>
+            <option value="INI Horsemen">INI Reiter</option>
+          </select>
+        </label>
+        <label class="inline-checkbox">
+          Manuelles würfeln
+          <input id="edit-use-manual-roll" name="useManualRoll" type="checkbox" />
+        </label>
+        <label class="inline-checkbox">
+          Immer minimiert
+          <input id="edit-always-minimized" name="alwaysMinimized" type="checkbox" />
+        </label>
+        <div class="actions">
+          <button id="edit-roll-initiative" class="ghost" type="button">INI jetzt würfeln</button>
+          <button id="edit-character-save" type="submit">Speichern</button>
+          <button id="edit-character-cancel" class="ghost" type="button">Abbrechen</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="warning-dialog" class="warning-dialog">
+      <form id="warning-dialog-form" method="dialog" class="warning-dialog-form">
+        <h3 id="warning-dialog-title">Warnung</h3>
+        <p id="warning-dialog-message"></p>
+        <div class="actions">
+          <button id="warning-dialog-confirm" type="button">Bestätigen</button>
+          <button id="warning-dialog-cancel" class="ghost" type="button">Abbrechen</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="pixels-settings-dialog" class="pixels-settings-dialog">
+      <form id="pixels-settings-form" method="dialog" class="pixels-settings-form">
+        <h3>Pixels Einstellungen</h3>
+        <label class="inline-checkbox">
+          Pixels für INI-Würfe nutzen
+          <input id="pixels-use-for-rolls" type="checkbox" />
+        </label>
+        <label class="inline-checkbox">
+          Simulierte Pixels verwenden
+          <input id="pixels-simulated" type="checkbox" />
+        </label>
+        <label>
+          Pixels Modus
+          <select id="pixels-mode-select">
+            <option value="pc-set-3">1) Jeder SC hat eigenes Set aus drei Pixels</option>
+            <option value="pc-single-3x">2) Jeder SC hat einen Pixel (3 Würfe)</option>
+            <option value="shared-set-3">3) Alle SC nutzen dasselbe Set aus drei Pixels</option>
+          </select>
+        </label>
+        <p id="pixels-mode-help" class="hint"></p>
+        <div id="pixels-assignment-list" class="pixels-assignment-list"></div>
+        <div class="actions">
+          <button id="pixels-disconnect-all" class="ghost" type="button">Alle Pixels trennen</button>
+          <button id="pixels-settings-close" type="button">Schließen</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="pixels-roll-dialog" class="pixels-roll-dialog">
+      <div class="pixels-roll-dialog-body">
+        <h3>Pixels Würfelphase</h3>
+        <p id="pixels-roll-status">Warte auf Würfe...</p>
+      </div>
+    </dialog>
+
+    <script src="app.js"></script>
+  </body>
+</html>
