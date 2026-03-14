@@ -7,6 +7,27 @@ const PIXELS_MODE = {
   PC_SINGLE_3X: "pc-single-3x",
   SHARED_SET_3: "shared-set-3",
 };
+const PIXELS_LED_DEFAULTS = {
+  critSuccess: {
+    enabled: true,
+    primaryColor: "green",
+    intervalMs: 320,
+    durationMs: 1000,
+  },
+  critFailure: {
+    enabled: true,
+    primaryColor: "red",
+    secondaryColor: "orange",
+    intervalMs: 150,
+    durationMs: 1000,
+  },
+  waitInitiative: {
+    enabled: true,
+    primaryColor: "white",
+    intervalMs: 900,
+  },
+};
+const PIXELS_LED_ALLOWED_COLORS = new Set(["red", "orange", "amber", "yellow", "green", "blue", "white"]);
 
 const state = {
   characters: [],
@@ -64,12 +85,26 @@ const pixelsUseForRollsEl = document.getElementById("pixels-use-for-rolls");
 const pixelsSimulatedEl = document.getElementById("pixels-simulated");
 const pixelsModeSelectEl = document.getElementById("pixels-mode-select");
 const pixelsModeHelpEl = document.getElementById("pixels-mode-help");
+const pixelsLedCritSuccessEnabledEl = document.getElementById("pixels-led-crit-success-enabled");
+const pixelsLedCritSuccessColorEl = document.getElementById("pixels-led-crit-success-color");
+const pixelsLedCritSuccessIntervalEl = document.getElementById("pixels-led-crit-success-interval");
+const pixelsLedCritSuccessDurationEl = document.getElementById("pixels-led-crit-success-duration");
+const pixelsLedCritFailureEnabledEl = document.getElementById("pixels-led-crit-failure-enabled");
+const pixelsLedCritFailureColorPrimaryEl = document.getElementById("pixels-led-crit-failure-color-primary");
+const pixelsLedCritFailureColorSecondaryEl = document.getElementById("pixels-led-crit-failure-color-secondary");
+const pixelsLedCritFailureIntervalEl = document.getElementById("pixels-led-crit-failure-interval");
+const pixelsLedCritFailureDurationEl = document.getElementById("pixels-led-crit-failure-duration");
+const pixelsLedWaitEnabledEl = document.getElementById("pixels-led-wait-enabled");
+const pixelsLedWaitColorEl = document.getElementById("pixels-led-wait-color");
+const pixelsLedWaitIntervalEl = document.getElementById("pixels-led-wait-interval");
 const pixelsAssignmentListEl = document.getElementById("pixels-assignment-list");
 const pixelsDisconnectAllBtn = document.getElementById("pixels-disconnect-all");
 const pixelsRollDialogEl = document.getElementById("pixels-roll-dialog");
 const pixelsRollTitleEl = document.getElementById("pixels-roll-title");
 const pixelsRollStatusEl = document.getElementById("pixels-roll-status");
 const pixelsRollListEl = document.getElementById("pixels-roll-list");
+const pixelsRollCancelBtn = document.getElementById("pixels-roll-cancel");
+const pixelsRollAutoAllBtn = document.getElementById("pixels-roll-auto-all");
 const pixelsStatusEl = document.getElementById("pixels-status");
 const clearLogBtn = document.getElementById("clear-log");
 const characterTemplate = document.getElementById("character-template");
@@ -107,6 +142,8 @@ const pixels = {
   sharedSet: [null, null, null],
   rememberedAssignmentsByCharacterId: {},
   rememberedSharedSet: [null, null, null],
+  ledEffects: new Map(),
+  ledConfig: structuredClone(PIXELS_LED_DEFAULTS),
   lastStatus:
     "Pixels: nicht verbunden (Chromium-Browser mit Web Bluetooth erforderlich).",
 };
@@ -118,7 +155,17 @@ let draggedRosterCharacterId = null;
 let draggedTurnGroupIndex = null;
 const rollDialogState = {
   rowsByCharacterId: new Map(),
+  action: "idle",
+  actionResolvers: new Set(),
 };
+
+class RollDialogActionError extends Error {
+  constructor(action) {
+    super(`roll-dialog-action:${action}`);
+    this.name = "RollDialogActionError";
+    this.action = action;
+  }
+}
 
 addForm.addEventListener("submit", (event) => {
   event.preventDefault();
@@ -154,6 +201,19 @@ addForm.addEventListener("submit", (event) => {
 
 nextTurnBtn.addEventListener("click", async () => {
   await generateNewTurn();
+});
+
+pixelsRollCancelBtn?.addEventListener("click", () => {
+  setRollDialogAction("cancel");
+});
+
+pixelsRollAutoAllBtn?.addEventListener("click", () => {
+  setRollDialogAction("all-auto");
+});
+
+pixelsRollDialogEl?.addEventListener("cancel", (event) => {
+  event.preventDefault();
+  setRollDialogAction("cancel");
 });
 
 function activateAdjacentCharacter(direction) {
@@ -400,6 +460,29 @@ if (pixelsModeSelectEl) {
   });
 }
 
+const pixelsLedSettingControlEls = [
+  pixelsLedCritSuccessEnabledEl,
+  pixelsLedCritSuccessColorEl,
+  pixelsLedCritSuccessIntervalEl,
+  pixelsLedCritSuccessDurationEl,
+  pixelsLedCritFailureEnabledEl,
+  pixelsLedCritFailureColorPrimaryEl,
+  pixelsLedCritFailureColorSecondaryEl,
+  pixelsLedCritFailureIntervalEl,
+  pixelsLedCritFailureDurationEl,
+  pixelsLedWaitEnabledEl,
+  pixelsLedWaitColorEl,
+  pixelsLedWaitIntervalEl,
+].filter((element) => Boolean(element));
+
+for (const controlEl of pixelsLedSettingControlEls) {
+  controlEl.addEventListener("change", () => {
+    pixels.ledConfig = readPixelsLedSettingsFromControls();
+    persistAppState();
+    renderPixelsSettingsDialog();
+  });
+}
+
 if (pixelsDisconnectAllBtn) {
   pixelsDisconnectAllBtn.addEventListener("click", async () => {
     await disconnectAllPixels();
@@ -545,6 +628,7 @@ async function generateNewTurn() {
     return;
   }
 
+  const roundStartSnapshot = captureRoundStartState();
   const surprisedCharacters = state.characters.filter((character) => character.surprised);
   if (surprisedCharacters.length) {
     const keepSurprisedStatus = await showWarningDialog(
@@ -566,6 +650,7 @@ async function generateNewTurn() {
   const rolledCharacters = [];
   const rollDetailsByCharacterId = new Map();
   const shouldShowPixelsRollDialog = preparePixelsRollDialog(state.characters, usePixelsForTurn, "INI Würfelphase");
+  let forceAutomaticRolls = false;
   if (shouldShowPixelsRollDialog) {
     setPixelsRollDialogStatus("Warte auf die anstehenden INI-Würfe.");
   }
@@ -598,25 +683,50 @@ async function generateNewTurn() {
       }
 
       const rollMode = getCharacterRollMode(character, usePixelsForTurn);
+      let effectiveRollMode = forceAutomaticRolls && rollMode !== "skip" ? "auto" : rollMode;
       if (shouldShowPixelsRollDialog) {
         updatePixelsRollDialogRow(character.id, {
-          mode: rollMode,
-          stateClass: rollMode === "auto" ? "pending" : "waiting",
+          mode: effectiveRollMode,
+          stateClass: effectiveRollMode === "auto" ? "pending" : "waiting",
           status:
-            rollMode === "manual"
+            effectiveRollMode === "manual"
               ? "Warte auf manuellen Wurf."
-              : rollMode === "pixels"
+              : effectiveRollMode === "pixels"
                 ? "Warte auf Pixels-Wurf."
                 : "Automatischer Wurf läuft.",
           detail:
-            rollMode === "manual"
+            effectiveRollMode === "manual"
               ? "3w6 im Dialog eingeben."
-              : rollMode === "pixels"
+              : effectiveRollMode === "pixels"
                 ? "Warte auf den verbundenen Würfel."
                 : "Dieser Wurf wird automatisch aufgelöst.",
         });
       }
-      const rollData = await resolveCharacterRoll(character, usePixelsForTurn);
+      let rollData;
+      try {
+        rollData = await resolveCharacterRoll(character, usePixelsForTurn, {
+          forceAutomatic: forceAutomaticRolls && effectiveRollMode !== "skip",
+        });
+      } catch (error) {
+        if (error instanceof RollDialogActionError) {
+          if (error.action === "all-auto") {
+            forceAutomaticRolls = true;
+            effectiveRollMode = "auto";
+            if (shouldShowPixelsRollDialog) {
+              setPixelsRollDialogStatus("Alle offenen SC-Würfe werden automatisch aufgelöst.");
+            }
+            rollData = await resolveCharacterRoll(character, usePixelsForTurn, { forceAutomatic: true });
+          } else if (error.action === "cancel") {
+            restoreRoundStartState(roundStartSnapshot);
+            render();
+            return;
+          } else {
+            throw error;
+          }
+        } else {
+          throw error;
+        }
+      }
       const roll = rollData.total;
       rollDetailsByCharacterId.set(character.id, rollData);
       const totalInitiative = computeTotalInitiative(character, {
@@ -625,7 +735,7 @@ async function generateNewTurn() {
         surprised: character.surprised,
       });
       if (shouldShowPixelsRollDialog) {
-        updatePixelsRollDialogRowResult(character, rollData, totalInitiative, rollMode);
+        updatePixelsRollDialogRowResult(character, rollData, totalInitiative, effectiveRollMode);
       }
 
       rolledCharacters.push({
@@ -1089,7 +1199,7 @@ function setManualRoll(id, rawValue) {
 }
 
 function setDamageMonitorMark(id, columnIndex, checked) {
-  if (!Number.isInteger(columnIndex) || columnIndex < 1 || columnIndex >= DAMAGE_MONITOR_COLUMN_COUNT) {
+  if (!Number.isInteger(columnIndex) || columnIndex < 0 || columnIndex >= DAMAGE_MONITOR_COLUMN_COUNT) {
     return;
   }
 
@@ -1244,7 +1354,6 @@ async function rollCharacterIntoCurrentRound(id) {
     return;
   }
 
-  pushTurnOrderUndoSnapshot("INI-Nachwurf rückgängig.");
   const usePixelsForTurn = canUsePixelsForRolls();
   const shouldShowPixelsRollDialog = preparePixelsRollDialog([character], usePixelsForTurn, "INI Nachwurf");
   let rollData;
@@ -1253,8 +1362,26 @@ async function rollCharacterIntoCurrentRound(id) {
     if (shouldShowPixelsRollDialog) {
       setPixelsRollDialogStatus(`Warte auf den Nachwurf für ${character.name}.`);
     }
-    const rollMode = getCharacterRollMode(character, usePixelsForTurn);
-    rollData = await resolveCharacterRoll(character, usePixelsForTurn);
+    let rollMode = getCharacterRollMode(character, usePixelsForTurn);
+    try {
+      rollData = await resolveCharacterRoll(character, usePixelsForTurn);
+    } catch (error) {
+      if (error instanceof RollDialogActionError) {
+        if (error.action === "all-auto") {
+          rollMode = "auto";
+          if (shouldShowPixelsRollDialog) {
+            setPixelsRollDialogStatus(`Nachwurf für ${character.name} wird automatisch aufgelöst.`);
+          }
+          rollData = await resolveCharacterRoll(character, usePixelsForTurn, { forceAutomatic: true });
+        } else if (error.action === "cancel") {
+          return;
+        } else {
+          throw error;
+        }
+      } else {
+        throw error;
+      }
+    }
     totalInitiative = computeTotalInitiative(character, {
       lastRoll: rollData.total,
       critBonusRoll: rollData.critBonusRoll,
@@ -1269,6 +1396,7 @@ async function rollCharacterIntoCurrentRound(id) {
     }
   }
 
+  pushTurnOrderUndoSnapshot("INI-Nachwurf rückgängig.");
   state.characters = state.characters.map((item) =>
     item.id === id
       ? {
@@ -1581,7 +1709,7 @@ function renderRoster() {
     const effectiveQmPenalty = damagePenalty.qm + dazedPenalty;
     const shouldShowDamagePenalty =
       dazedPenalty > 0 ||
-      normalizeDamageMonitorMarks(character.damageMonitorMarks).some((active, index) => (index > 0 ? active : false));
+      normalizeDamageMonitorMarks(character.damageMonitorMarks).some((active) => active);
     const unfreeDefensePenalty = Math.max(0, Math.round(Number(character.unfreeDefensePenalty) || 0));
     const penaltyTexts = [];
     if (shouldShowDamagePenalty) {
@@ -1624,7 +1752,7 @@ function renderRoster() {
     const damageMarks = normalizeDamageMonitorMarks(character.damageMonitorMarks);
     for (const woundInput of woundInputs) {
       const columnIndex = Number(woundInput.dataset.damageIndex);
-      if (!Number.isInteger(columnIndex) || columnIndex < 1 || columnIndex >= DAMAGE_MONITOR_COLUMN_COUNT) {
+      if (!Number.isInteger(columnIndex) || columnIndex < 0 || columnIndex >= DAMAGE_MONITOR_COLUMN_COUNT) {
         woundInput.disabled = true;
         continue;
       }
@@ -1831,7 +1959,7 @@ function renderTracker() {
       const effectiveQmPenalty = damagePenalty.qm + dazedPenalty;
       const shouldShowDamagePenalty =
         dazedPenalty > 0 ||
-        normalizeDamageMonitorMarks(hintCharacter.damageMonitorMarks).some((active, index) => (index > 0 ? active : false));
+        normalizeDamageMonitorMarks(hintCharacter.damageMonitorMarks).some((active) => active);
       const unfreeDefensePenalty = Math.max(0, Math.round(Number(hintCharacter.unfreeDefensePenalty) || 0));
       const hintTexts = [];
       if (shouldShowDamagePenalty) {
@@ -2208,6 +2336,7 @@ function persistAppState() {
       simulated: pixels.simulated,
       useForRolls: pixels.useForRolls,
       mode: normalizePixelsMode(pixels.mode),
+      ledConfig: normalizePixelsLedSettings(pixels.ledConfig),
       ...captureRememberedPixelsSettings(),
     },
   };
@@ -2344,6 +2473,7 @@ function hydrateStateFromStoragePayload(parsedApp) {
   pixels.simulated = Boolean(pxSettings.simulated);
   pixels.useForRolls = Boolean(pxSettings.useForRolls);
   pixels.mode = normalizePixelsMode(pxSettings.mode);
+  pixels.ledConfig = normalizePixelsLedSettings(pxSettings.ledConfig);
   pixels.assignmentsByCharacterId = {};
   pixels.sharedSet = [null, null, null];
   pixels.rememberedAssignmentsByCharacterId = Object.fromEntries(
@@ -2580,6 +2710,7 @@ async function exportFullSnapshotToCsv() {
       simulated: pixels.simulated,
       useForRolls: pixels.useForRolls,
       mode: normalizePixelsMode(pixels.mode),
+      ledConfig: normalizePixelsLedSettings(pixels.ledConfig),
       lastStatus: pixels.lastStatus,
       ...captureRememberedPixelsSettings(),
     },
@@ -2634,6 +2765,7 @@ function importFullSnapshotRows(rows) {
     pixels.simulated = Boolean(px.simulated);
     pixels.useForRolls = Boolean(px.useForRolls);
     pixels.mode = normalizePixelsMode(px.mode);
+    pixels.ledConfig = normalizePixelsLedSettings(px.ledConfig);
     pixels.assignmentsByCharacterId = {};
     pixels.sharedSet = [null, null, null];
     pixels.rememberedAssignmentsByCharacterId = Object.fromEntries(
@@ -2852,6 +2984,7 @@ function resetEntireAppState() {
   pixels.useForRolls = false;
   pixels.simulated = false;
   pixels.mode = PIXELS_MODE.PC_SET_3;
+  pixels.ledConfig = structuredClone(PIXELS_LED_DEFAULTS);
   pixels.assignmentsByCharacterId = {};
   pixels.sharedSet = [null, null, null];
   pixels.rememberedAssignmentsByCharacterId = {};
@@ -2939,7 +3072,6 @@ function normalizeDamageMonitorMarks(value) {
   for (let index = 0; index < DAMAGE_MONITOR_COLUMN_COUNT; index += 1) {
     marks[index] = Boolean(value[index]);
   }
-  marks[0] = false;
   return marks;
 }
 
@@ -2958,7 +3090,7 @@ function parseDamagePenalty(rawValue) {
 function computeDamagePenalty(character) {
   const marks = normalizeDamageMonitorMarks(character.damageMonitorMarks);
   let rightmostIndex = -1;
-  for (let index = DAMAGE_MONITOR_COLUMN_COUNT - 1; index >= 1; index -= 1) {
+  for (let index = DAMAGE_MONITOR_COLUMN_COUNT - 1; index >= 0; index -= 1) {
     if (marks[index]) {
       rightmostIndex = index;
       break;
@@ -3591,6 +3723,46 @@ function setPixelsRollDialogTitle(message) {
   }
 }
 
+function setRollDialogAction(action) {
+  rollDialogState.action = action;
+  for (const resolve of Array.from(rollDialogState.actionResolvers)) {
+    resolve(action);
+  }
+  rollDialogState.actionResolvers.clear();
+}
+
+function resetRollDialogAction() {
+  setRollDialogAction("continue");
+}
+
+function waitForRollDialogAction() {
+  if (rollDialogState.action !== "continue") {
+    return Promise.resolve(rollDialogState.action);
+  }
+
+  return new Promise((resolve) => {
+    rollDialogState.actionResolvers.add(resolve);
+  });
+}
+
+function throwIfRollDialogActionPending() {
+  if (rollDialogState.action === "cancel" || rollDialogState.action === "all-auto") {
+    throw new RollDialogActionError(rollDialogState.action);
+  }
+}
+
+async function waitForPixelsRollOrDialogAction(pixel) {
+  throwIfRollDialogActionPending();
+  const result = await Promise.race([
+    waitForSinglePixelsD6(pixel).then((face) => ({ type: "roll", face })),
+    waitForRollDialogAction().then((action) => ({ type: "action", action })),
+  ]);
+  if (result.type === "action") {
+    throw new RollDialogActionError(result.action);
+  }
+  return result.face;
+}
+
 function clearPixelsRollDialogRows() {
   rollDialogState.rowsByCharacterId.clear();
   if (pixelsRollListEl) {
@@ -3754,14 +3926,23 @@ function describeRollDialogMix(characters, usePixelsForTurn) {
 }
 
 function preparePixelsRollDialog(characters, usePixelsForTurn, title = "INI Würfelphase") {
-  if (!shouldUseRollDialogForCharacters(characters, usePixelsForTurn)) {
+  const dialogCharacters = characters.filter((character) => {
+    if (!character || character.type !== "PC") {
+      return false;
+    }
+    const mode = getCharacterRollMode(character, usePixelsForTurn);
+    return mode === "manual" || mode === "pixels";
+  });
+
+  if (!dialogCharacters.length) {
     return false;
   }
 
   clearPixelsRollDialogRows();
+  resetRollDialogAction();
   setPixelsRollDialogTitle(title);
-  setPixelsRollDialogStatus(`Würfelquellen: ${describeRollDialogMix(characters, usePixelsForTurn)}.`);
-  for (const character of characters) {
+  setPixelsRollDialogStatus(`Würfelquellen: ${describeRollDialogMix(dialogCharacters, usePixelsForTurn)}.`);
+  for (const character of dialogCharacters) {
     createPixelsRollDialogRow(character, getCharacterRollMode(character, usePixelsForTurn));
   }
   openPixelsRollDialog();
@@ -3801,7 +3982,7 @@ async function requestRollDialogNumberInput(character, options) {
   refs.controlsEl.appendChild(fieldWrap);
   refs.controlsEl.appendChild(submitBtn);
 
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const commit = () => {
       const value = Math.round(Number(input.value));
       if (!Number.isFinite(value) || value < options.min || value > options.max) {
@@ -3814,6 +3995,11 @@ async function requestRollDialogNumberInput(character, options) {
       resolve(value);
     };
 
+    const handleAction = (action) => {
+      refs.controlsEl.innerHTML = "";
+      reject(new RollDialogActionError(action));
+    };
+
     submitBtn.addEventListener("click", commit, { once: true });
     input.addEventListener("keydown", (event) => {
       if (event.key === "Enter") {
@@ -3821,6 +4007,7 @@ async function requestRollDialogNumberInput(character, options) {
         commit();
       }
     });
+    waitForRollDialogAction().then(handleAction);
     requestAnimationFrame(() => {
       input.focus();
       input.select();
@@ -3844,7 +4031,92 @@ function closePixelsRollDialog() {
     return;
   }
   clearPixelsRollDialogRows();
+  setRollDialogAction("idle");
   pixelsRollDialogEl.close();
+}
+
+function captureRoundStartState() {
+  return {
+    characters: state.characters.map((character) => ({
+      ...character,
+      damageMonitorMarks: normalizeDamageMonitorMarks(character.damageMonitorMarks),
+      lastPixelsFaces: Array.isArray(character.lastPixelsFaces) ? [...character.lastPixelsFaces] : null,
+    })),
+    turnEntries: state.turnEntries.map((entry) => ({ ...entry })),
+    currentTurnIndex: state.currentTurnIndex,
+    activeCharacterId: state.activeCharacterId,
+    round: state.round,
+    turnHistory: state.turnHistory.map((entry) => ({
+      ...entry,
+      entries: Array.isArray(entry.entries) ? entry.entries.map((item) => ({ ...item })) : [],
+      rolls: Array.isArray(entry.rolls)
+        ? entry.rolls.map((item) => ({
+            ...item,
+            lastPixelsFaces: Array.isArray(item.lastPixelsFaces) ? [...item.lastPixelsFaces] : null,
+          }))
+        : [],
+      usedTurnEntryIds: Array.isArray(entry.usedTurnEntryIds) ? [...entry.usedTurnEntryIds] : [],
+      activeAbilityCharacterIds: Array.isArray(entry.activeAbilityCharacterIds) ? [...entry.activeAbilityCharacterIds] : [],
+      dazedAppliedCharacterIds: Array.isArray(entry.dazedAppliedCharacterIds) ? [...entry.dazedAppliedCharacterIds] : [],
+    })),
+    turnHistoryIndex: state.turnHistoryIndex,
+    usedTurnEntryIds: [...state.usedTurnEntryIds],
+    activeAbilityCharacterIds: [...state.activeAbilityCharacterIds],
+    dazedAppliedCharacterIds: [...state.dazedAppliedCharacterIds],
+    dazedAppliedRound: state.dazedAppliedRound,
+    combatLog: state.combatLog.map((entry) => ({ ...entry })),
+    nextLogId: state.nextLogId,
+  };
+}
+
+function restoreRoundStartState(snapshot) {
+  if (!snapshot) {
+    return;
+  }
+
+  state.characters = Array.isArray(snapshot.characters)
+    ? snapshot.characters.map((character) => ({
+        ...character,
+        damageMonitorMarks: normalizeDamageMonitorMarks(character.damageMonitorMarks),
+        lastPixelsFaces: Array.isArray(character.lastPixelsFaces) ? [...character.lastPixelsFaces] : null,
+      }))
+    : [];
+  state.turnEntries = Array.isArray(snapshot.turnEntries) ? snapshot.turnEntries.map((entry) => ({ ...entry })) : [];
+  state.currentTurnIndex = clampTurnPointer(Number(snapshot.currentTurnIndex), state.turnEntries.length);
+  state.activeCharacterId =
+    snapshot.activeCharacterId === null || snapshot.activeCharacterId === undefined
+      ? null
+      : Number.isFinite(Number(snapshot.activeCharacterId))
+        ? Number(snapshot.activeCharacterId)
+        : null;
+  state.round = Math.max(0, Math.round(Number(snapshot.round) || 0));
+  state.turnHistory = Array.isArray(snapshot.turnHistory)
+    ? snapshot.turnHistory.map((entry) => ({
+        ...entry,
+        entries: Array.isArray(entry.entries) ? entry.entries.map((item) => ({ ...item })) : [],
+        rolls: Array.isArray(entry.rolls)
+          ? entry.rolls.map((item) => ({
+              ...item,
+              lastPixelsFaces: Array.isArray(item.lastPixelsFaces) ? [...item.lastPixelsFaces] : null,
+            }))
+          : [],
+        usedTurnEntryIds: Array.isArray(entry.usedTurnEntryIds) ? [...entry.usedTurnEntryIds] : [],
+        activeAbilityCharacterIds: Array.isArray(entry.activeAbilityCharacterIds) ? [...entry.activeAbilityCharacterIds] : [],
+        dazedAppliedCharacterIds: Array.isArray(entry.dazedAppliedCharacterIds) ? [...entry.dazedAppliedCharacterIds] : [],
+      }))
+    : [];
+  state.turnHistoryIndex = clamp(Number(snapshot.turnHistoryIndex), -1, state.turnHistory.length - 1);
+  state.usedTurnEntryIds = Array.isArray(snapshot.usedTurnEntryIds) ? [...snapshot.usedTurnEntryIds] : [];
+  state.activeAbilityCharacterIds = Array.isArray(snapshot.activeAbilityCharacterIds)
+    ? [...snapshot.activeAbilityCharacterIds]
+    : [];
+  state.dazedAppliedCharacterIds = Array.isArray(snapshot.dazedAppliedCharacterIds)
+    ? [...snapshot.dazedAppliedCharacterIds]
+    : [];
+  state.dazedAppliedRound = Math.max(0, Math.round(Number(snapshot.dazedAppliedRound) || 0));
+  state.combatLog = Array.isArray(snapshot.combatLog) ? snapshot.combatLog.map((entry) => ({ ...entry })) : [];
+  state.nextLogId = Math.max(1, Math.round(Number(snapshot.nextLogId) || 1));
+  syncActiveTurnPointer();
 }
 
 function normalizePixelsMode(value) {
@@ -3852,6 +4124,127 @@ function normalizePixelsMode(value) {
     return value;
   }
   return PIXELS_MODE.PC_SET_3;
+}
+
+function normalizePixelsLedColor(value, fallback) {
+  return PIXELS_LED_ALLOWED_COLORS.has(value) ? value : fallback;
+}
+
+function normalizePixelsLedSettings(settings) {
+  const source = settings && typeof settings === "object" ? settings : {};
+  const critSuccessSource = source.critSuccess && typeof source.critSuccess === "object" ? source.critSuccess : {};
+  const critFailureSource = source.critFailure && typeof source.critFailure === "object" ? source.critFailure : {};
+  const waitInitiativeSource =
+    source.waitInitiative && typeof source.waitInitiative === "object" ? source.waitInitiative : {};
+
+  return {
+    critSuccess: {
+      enabled:
+        critSuccessSource.enabled === undefined
+          ? PIXELS_LED_DEFAULTS.critSuccess.enabled
+          : Boolean(critSuccessSource.enabled),
+      primaryColor: normalizePixelsLedColor(
+        critSuccessSource.primaryColor,
+        PIXELS_LED_DEFAULTS.critSuccess.primaryColor
+      ),
+      intervalMs: clamp(Math.round(Number(critSuccessSource.intervalMs) || PIXELS_LED_DEFAULTS.critSuccess.intervalMs), 120, 3000),
+      durationMs: clamp(Math.round(Number(critSuccessSource.durationMs) || PIXELS_LED_DEFAULTS.critSuccess.durationMs), 300, 5000),
+    },
+    critFailure: {
+      enabled:
+        critFailureSource.enabled === undefined
+          ? PIXELS_LED_DEFAULTS.critFailure.enabled
+          : Boolean(critFailureSource.enabled),
+      primaryColor: normalizePixelsLedColor(
+        critFailureSource.primaryColor,
+        PIXELS_LED_DEFAULTS.critFailure.primaryColor
+      ),
+      secondaryColor: normalizePixelsLedColor(
+        critFailureSource.secondaryColor,
+        PIXELS_LED_DEFAULTS.critFailure.secondaryColor
+      ),
+      intervalMs: clamp(Math.round(Number(critFailureSource.intervalMs) || PIXELS_LED_DEFAULTS.critFailure.intervalMs), 80, 3000),
+      durationMs: clamp(Math.round(Number(critFailureSource.durationMs) || PIXELS_LED_DEFAULTS.critFailure.durationMs), 300, 5000),
+    },
+    waitInitiative: {
+      enabled:
+        waitInitiativeSource.enabled === undefined
+          ? PIXELS_LED_DEFAULTS.waitInitiative.enabled
+          : Boolean(waitInitiativeSource.enabled),
+      primaryColor: normalizePixelsLedColor(
+        waitInitiativeSource.primaryColor,
+        PIXELS_LED_DEFAULTS.waitInitiative.primaryColor
+      ),
+      intervalMs: clamp(
+        Math.round(Number(waitInitiativeSource.intervalMs) || PIXELS_LED_DEFAULTS.waitInitiative.intervalMs),
+        120,
+        4000
+      ),
+    },
+  };
+}
+
+function readPixelsLedSettingsFromControls() {
+  return normalizePixelsLedSettings({
+    critSuccess: {
+      enabled: Boolean(pixelsLedCritSuccessEnabledEl?.checked),
+      primaryColor: pixelsLedCritSuccessColorEl?.value,
+      intervalMs: pixelsLedCritSuccessIntervalEl?.value,
+      durationMs: pixelsLedCritSuccessDurationEl?.value,
+    },
+    critFailure: {
+      enabled: Boolean(pixelsLedCritFailureEnabledEl?.checked),
+      primaryColor: pixelsLedCritFailureColorPrimaryEl?.value,
+      secondaryColor: pixelsLedCritFailureColorSecondaryEl?.value,
+      intervalMs: pixelsLedCritFailureIntervalEl?.value,
+      durationMs: pixelsLedCritFailureDurationEl?.value,
+    },
+    waitInitiative: {
+      enabled: Boolean(pixelsLedWaitEnabledEl?.checked),
+      primaryColor: pixelsLedWaitColorEl?.value,
+      intervalMs: pixelsLedWaitIntervalEl?.value,
+    },
+  });
+}
+
+function syncPixelsLedSettingsControls() {
+  const ledConfig = normalizePixelsLedSettings(pixels.ledConfig);
+  if (pixelsLedCritSuccessEnabledEl) {
+    pixelsLedCritSuccessEnabledEl.checked = ledConfig.critSuccess.enabled;
+  }
+  if (pixelsLedCritSuccessColorEl) {
+    pixelsLedCritSuccessColorEl.value = ledConfig.critSuccess.primaryColor;
+  }
+  if (pixelsLedCritSuccessIntervalEl) {
+    pixelsLedCritSuccessIntervalEl.value = String(ledConfig.critSuccess.intervalMs);
+  }
+  if (pixelsLedCritSuccessDurationEl) {
+    pixelsLedCritSuccessDurationEl.value = String(ledConfig.critSuccess.durationMs);
+  }
+  if (pixelsLedCritFailureEnabledEl) {
+    pixelsLedCritFailureEnabledEl.checked = ledConfig.critFailure.enabled;
+  }
+  if (pixelsLedCritFailureColorPrimaryEl) {
+    pixelsLedCritFailureColorPrimaryEl.value = ledConfig.critFailure.primaryColor;
+  }
+  if (pixelsLedCritFailureColorSecondaryEl) {
+    pixelsLedCritFailureColorSecondaryEl.value = ledConfig.critFailure.secondaryColor;
+  }
+  if (pixelsLedCritFailureIntervalEl) {
+    pixelsLedCritFailureIntervalEl.value = String(ledConfig.critFailure.intervalMs);
+  }
+  if (pixelsLedCritFailureDurationEl) {
+    pixelsLedCritFailureDurationEl.value = String(ledConfig.critFailure.durationMs);
+  }
+  if (pixelsLedWaitEnabledEl) {
+    pixelsLedWaitEnabledEl.checked = ledConfig.waitInitiative.enabled;
+  }
+  if (pixelsLedWaitColorEl) {
+    pixelsLedWaitColorEl.value = ledConfig.waitInitiative.primaryColor;
+  }
+  if (pixelsLedWaitIntervalEl) {
+    pixelsLedWaitIntervalEl.value = String(ledConfig.waitInitiative.intervalMs);
+  }
 }
 
 function getPcCharactersInRosterOrder() {
@@ -3969,6 +4362,22 @@ function hasAnyConnectedPixels() {
   });
 }
 
+function hasAnyRememberedPixels() {
+  if (Array.isArray(pixels.rememberedSharedSet) && pixels.rememberedSharedSet.some((entry) => Boolean(entry))) {
+    return true;
+  }
+
+  return Object.values(pixels.rememberedAssignmentsByCharacterId || {}).some((assignment) => {
+    if (!assignment || typeof assignment !== "object") {
+      return false;
+    }
+    if (assignment.single) {
+      return true;
+    }
+    return Array.isArray(assignment.set3) && assignment.set3.some((entry) => Boolean(entry));
+  });
+}
+
 function getRollPixelsForCharacter(characterId) {
   const assignment = ensureCharacterPixelsAssignment(characterId);
   if (pixels.mode === PIXELS_MODE.PC_SINGLE_3X) {
@@ -3983,15 +4392,19 @@ function getRollPixelsForCharacter(characterId) {
 function updatePixelsControls() {
   const supported = supportsPixels();
   const connected = hasAnyConnectedPixels();
+  const remembered = hasAnyRememberedPixels();
   const available = connected || pixels.simulated;
+  const reconnectPending = !connected && remembered && supportsPixelsAutoReconnect();
 
-  if (!available && pixels.useForRolls) {
+  if (!available && !reconnectPending && pixels.useForRolls) {
     pixels.useForRolls = false;
   }
 
   if (!available) {
     if (!supported) {
       updatePixelsStatus("Pixels: Web Bluetooth ist in diesem Browser nicht verfügbar.");
+    } else if (reconnectPending || pixels.reconnecting) {
+      updatePixelsStatus("Pixels: gemerkte Würfel werden wieder verbunden...");
     } else if (!pixels.lastStatus.startsWith("Pixels: nicht verbunden")) {
       updatePixelsStatus("Pixels: nicht verbunden (Chromium-Browser mit Web Bluetooth erforderlich).");
     }
@@ -4003,7 +4416,7 @@ function updatePixelsControls() {
 
   if (pixelsUseForRollsEl) {
     pixelsUseForRollsEl.checked = pixels.useForRolls;
-    pixelsUseForRollsEl.disabled = !available;
+    pixelsUseForRollsEl.disabled = !available && !reconnectPending;
   }
   if (pixelsSimulatedEl) {
     pixelsSimulatedEl.checked = pixels.simulated;
@@ -4074,6 +4487,7 @@ async function reconnectPixelFromRememberedRef(rememberedRef) {
     await pixel.connect();
   }
 
+  void triggerPixelsLedPatternSafe([pixel], "connected");
   return isUsablePixelsObject(pixel) ? pixel : null;
 }
 
@@ -4159,42 +4573,227 @@ async function requestAndConnectSinglePixel(waitMessage) {
     await selectedPixel.connect();
   }
   debugPixels("Verbundenes Pixel-Objekt", describePixelObject(selectedPixel));
+  void triggerPixelsLedPatternSafe([selectedPixel], "connected");
   return selectedPixel;
 }
 
-function getPixelsBlinkColor(sdk) {
-  if (sdk?.Color?.red) {
-    return sdk.Color.red;
-  }
-  if (sdk?.Color?.Red) {
-    return sdk.Color.Red;
-  }
-  throw new Error("keine unterstützte Pixels-Farbe gefunden");
+function getUniqueConnectedPixels(targetPixels) {
+  return Array.from(new Set((Array.isArray(targetPixels) ? targetPixels : []).filter((pixel) => Boolean(pixel))));
 }
 
-async function blinkPixelsDice(targetPixels, targetLabel) {
-  const connectedPixels = Array.from(
-    new Set((Array.isArray(targetPixels) ? targetPixels : []).filter((pixel) => Boolean(pixel)))
-  );
-  if (!connectedPixels.length) {
-    throw new Error("keine verbundenen Pixels vorhanden");
+function getPixelsColor(sdk, colorNames) {
+  for (const colorName of colorNames) {
+    if (sdk?.Color?.[colorName] !== undefined) {
+      return sdk.Color[colorName];
+    }
+  }
+  throw new Error(`keine unterstützte Pixels-Farbe gefunden (${colorNames.join(", ")})`);
+}
+
+function attachPixelsRollListener(pixel, onRoll) {
+  const detachFns = [];
+
+  if (typeof pixel?.addEventListener === "function" && typeof pixel?.removeEventListener === "function") {
+    pixel.addEventListener("roll", onRoll);
+    detachFns.push(() => pixel.removeEventListener("roll", onRoll));
+  }
+
+  if (typeof pixel?.on === "function" && typeof pixel?.off === "function") {
+    pixel.on("roll", onRoll);
+    detachFns.push(() => pixel.off("roll", onRoll));
+  }
+
+  if (typeof pixel?.onRoll === "function") {
+    const maybeDetach = pixel.onRoll(onRoll);
+    if (typeof maybeDetach === "function") {
+      detachFns.push(maybeDetach);
+    }
+  }
+
+  return () => {
+    for (const detach of detachFns) {
+      if (typeof detach === "function") {
+        detach();
+      }
+    }
+  };
+}
+
+function stopPixelsLedEffect(pixel) {
+  const effect = pixels.ledEffects.get(pixel);
+  if (!effect) {
+    return;
+  }
+
+  effect.stopped = true;
+  if (effect.stepTimeoutId !== null) {
+    clearTimeout(effect.stepTimeoutId);
+  }
+  if (effect.durationTimeoutId !== null) {
+    clearTimeout(effect.durationTimeoutId);
+  }
+  if (typeof effect.detachRollListener === "function") {
+    effect.detachRollListener();
+  }
+  pixels.ledEffects.delete(pixel);
+}
+
+function stopPixelsLedEffects(targetPixels) {
+  for (const pixel of getUniqueConnectedPixels(targetPixels)) {
+    stopPixelsLedEffect(pixel);
+  }
+}
+
+async function startPixelsLedPatternOnPixel(pixel, sdk, pattern) {
+  if (!pixel || typeof pixel.blink !== "function") {
+    debugPixels("LED-Effekt übersprungen, Pixel ohne Blink-Unterstützung.", describePixelObject(pixel));
+    return false;
+  }
+
+  stopPixelsLedEffect(pixel);
+
+  const colors = pattern.colorNames.map((colorNames) => getPixelsColor(sdk, colorNames));
+  const effect = {
+    stopped: false,
+    stepTimeoutId: null,
+    durationTimeoutId: null,
+    detachRollListener: null,
+  };
+  pixels.ledEffects.set(pixel, effect);
+
+  const cleanup = () => {
+    if (pixels.ledEffects.get(pixel) !== effect) {
+      return;
+    }
+    stopPixelsLedEffect(pixel);
+  };
+
+  if (pattern.stopOnRoll) {
+    effect.detachRollListener = attachPixelsRollListener(pixel, cleanup);
+  }
+
+  let stepIndex = 0;
+  const runStep = async () => {
+    if (effect.stopped) {
+      return;
+    }
+
+    const currentColor = colors[stepIndex];
+    try {
+      await pixel.blink(currentColor);
+    } catch (error) {
+      debugPixels("LED-Effekt fehlgeschlagen.", {
+        pixel: describePixelObject(pixel),
+        error,
+        pattern,
+      });
+      cleanup();
+      return;
+    }
+
+    if (effect.stopped) {
+      return;
+    }
+
+    if (!pattern.repeat) {
+      stepIndex += 1;
+      if (stepIndex >= colors.length) {
+        cleanup();
+        return;
+      }
+    } else {
+      stepIndex = (stepIndex + 1) % colors.length;
+    }
+
+    effect.stepTimeoutId = setTimeout(() => {
+      void runStep();
+    }, pattern.intervalMs);
+  };
+
+  if (Number.isFinite(pattern.durationMs) && pattern.durationMs > 0) {
+    effect.durationTimeoutId = setTimeout(() => {
+      cleanup();
+    }, pattern.durationMs);
+  }
+
+  void runStep();
+  return true;
+}
+
+async function triggerPixelsLedPattern(targetPixels, patternName) {
+  const connectedPixels = getUniqueConnectedPixels(targetPixels);
+  if (!connectedPixels.length || pixels.simulated) {
+    return 0;
+  }
+
+  const ledConfig = normalizePixelsLedSettings(pixels.ledConfig);
+  let pattern = null;
+  if (patternName === "connected") {
+    pattern = {
+      colorNames: [["green", "Green"], ["green", "Green"], ["green", "Green"]],
+      intervalMs: 160,
+      repeat: false,
+    };
+  } else if (patternName === "waitInitiative") {
+    if (!ledConfig.waitInitiative.enabled) {
+      return 0;
+    }
+    pattern = {
+      colorNames: [[ledConfig.waitInitiative.primaryColor, ledConfig.waitInitiative.primaryColor.slice(0, 1).toUpperCase() + ledConfig.waitInitiative.primaryColor.slice(1)]],
+      intervalMs: ledConfig.waitInitiative.intervalMs,
+      repeat: true,
+      stopOnRoll: true,
+    };
+  } else if (patternName === "critSuccess") {
+    if (!ledConfig.critSuccess.enabled) {
+      return 0;
+    }
+    pattern = {
+      colorNames: [[ledConfig.critSuccess.primaryColor, ledConfig.critSuccess.primaryColor.slice(0, 1).toUpperCase() + ledConfig.critSuccess.primaryColor.slice(1)]],
+      intervalMs: ledConfig.critSuccess.intervalMs,
+      durationMs: ledConfig.critSuccess.durationMs,
+      repeat: true,
+      stopOnRoll: true,
+    };
+  } else if (patternName === "critFailure") {
+    if (!ledConfig.critFailure.enabled) {
+      return 0;
+    }
+    pattern = {
+      colorNames: [
+        [ledConfig.critFailure.primaryColor, ledConfig.critFailure.primaryColor.slice(0, 1).toUpperCase() + ledConfig.critFailure.primaryColor.slice(1)],
+        [ledConfig.critFailure.secondaryColor, ledConfig.critFailure.secondaryColor.slice(0, 1).toUpperCase() + ledConfig.critFailure.secondaryColor.slice(1)],
+      ],
+      intervalMs: ledConfig.critFailure.intervalMs,
+      durationMs: ledConfig.critFailure.durationMs,
+      repeat: true,
+      stopOnRoll: true,
+    };
+  } else if (patternName === "test") {
+    pattern = {
+      colorNames: [["red", "Red"]],
+      intervalMs: 160,
+      repeat: false,
+    };
+  }
+  if (!pattern) {
+    throw new Error(`unbekanntes LED-Muster: ${patternName}`);
   }
 
   const sdk = await ensurePixelsSdkLoaded();
-  const blinkColor = getPixelsBlinkColor(sdk);
-  let blinkCount = 0;
+  const started = await Promise.all(
+    connectedPixels.map((pixel) => startPixelsLedPatternOnPixel(pixel, sdk, pattern))
+  );
+  return started.filter(Boolean).length;
+}
 
-  for (const pixel of connectedPixels) {
-    if (typeof pixel.blink !== "function") {
-      throw new Error(`${getConnectedPixelLabel(pixel)} unterstützt keine LED-Steuerung`);
-    }
-    await pixel.blink(blinkColor);
-    blinkCount += 1;
+async function triggerPixelsLedPatternSafe(targetPixels, patternName) {
+  try {
+    return await triggerPixelsLedPattern(targetPixels, patternName);
+  } catch (error) {
+    debugPixels(`LED-Muster ${patternName} fehlgeschlagen.`, error);
+    return 0;
   }
-
-  const suffix = blinkCount === 1 ? "" : "n";
-  updatePixelsStatus(`Pixels: LED-Test für ${targetLabel} auf ${blinkCount} Würfel${suffix} gestartet.`);
-  logEvent(`Pixels: LED-Test für ${targetLabel} auf ${blinkCount} Würfel${suffix} gestartet.`);
 }
 
 async function runPixelsLedTest(targetPixels, targetLabel) {
@@ -4202,7 +4801,13 @@ async function runPixelsLedTest(targetPixels, targetLabel) {
   updatePixelsControls();
   renderPixelsSettingsDialog();
   try {
-    await blinkPixelsDice(targetPixels, targetLabel);
+    const blinkCount = await triggerPixelsLedPattern(targetPixels, "test");
+    if (!blinkCount) {
+      throw new Error("keine verbundenen Pixels vorhanden");
+    }
+    const suffix = blinkCount === 1 ? "" : "n";
+    updatePixelsStatus(`Pixels: LED-Test für ${targetLabel} auf ${blinkCount} Würfel${suffix} gestartet.`);
+    logEvent(`Pixels: LED-Test für ${targetLabel} auf ${blinkCount} Würfel${suffix} gestartet.`);
   } catch (error) {
     const message = error && typeof error.message === "string" ? error.message : String(error);
     updatePixelsStatus(`Pixels: LED-Test fehlgeschlagen (${message}).`);
@@ -4253,6 +4858,7 @@ function uniquePixelsFromAssignments() {
 
 async function disconnectAllPixels() {
   const allPixels = uniquePixelsFromAssignments();
+  stopPixelsLedEffects(allPixels);
   for (const pixel of allPixels) {
     try {
       if (typeof pixel.disconnect === "function") {
@@ -4519,6 +5125,7 @@ function renderPixelsSettingsDialog() {
   if (pixelsSimulatedEl) {
     pixelsSimulatedEl.checked = pixels.simulated;
   }
+  syncPixelsLedSettingsControls();
 
   pixelsAssignmentListEl.innerHTML = "";
   const pcCharacters = getPcCharactersInRosterOrder();
@@ -4846,11 +5453,13 @@ async function requestManualCriticalBonusRoll(character) {
 }
 
 async function roll1d6WithPixels(characterName, rollPixels) {
+  throwIfRollDialogActionPending();
   if (pixels.simulated) {
     const statusMessage = `Warte auf Krit-W6 von ${characterName} (simuliert).`;
     setPixelsRollDialogStatus(statusMessage);
     updatePixelsStatus(`Pixels (Sim): ${statusMessage}`);
     await delay(220);
+    throwIfRollDialogActionPending();
     return {
       face: d6(),
       simulated: true,
@@ -4867,12 +5476,13 @@ async function roll1d6WithPixels(characterName, rollPixels) {
   setPixelsRollDialogStatus(statusMessage);
   updatePixelsStatus(`Pixels: ${statusMessage}`);
   return {
-    face: await waitForSinglePixelsD6(pixel),
+    face: await waitForPixelsRollOrDialogAction(pixel),
     simulated: false,
   };
 }
 
 async function roll3d6WithPixels(characterName, rollPixels) {
+  throwIfRollDialogActionPending();
   if (pixels.simulated) {
     const faces = [];
     for (let i = 0; i < 3; i += 1) {
@@ -4880,6 +5490,7 @@ async function roll3d6WithPixels(characterName, rollPixels) {
       setPixelsRollDialogStatus(statusMessage);
       updatePixelsStatus(`Pixels (Sim): ${statusMessage}`);
       await delay(220);
+      throwIfRollDialogActionPending();
       faces.push(d6());
     }
 
@@ -4899,14 +5510,29 @@ async function roll3d6WithPixels(characterName, rollPixels) {
     const statusMessage = `Warte auf drei Würfe von ${characterName} (${dieLabels}).`;
     setPixelsRollDialogStatus(statusMessage);
     updatePixelsStatus(`Pixels: ${statusMessage}`);
-    const faces = await Promise.all(
-      rollPixels.slice(0, 3).map((pixel, index) =>
-        waitForSinglePixelsD6(pixel).catch((error) => {
-          const message = error && typeof error.message === "string" ? error.message : String(error);
-          throw new Error(`W${index + 1} ${getConnectedPixelLabel(pixel)}: ${message}`);
-        })
-      )
-    );
+    const activePixels = rollPixels.slice(0, 3);
+    await triggerPixelsLedPatternSafe(activePixels, "waitInitiative");
+    let faces;
+    try {
+      faces = await Promise.all(
+        activePixels.map((pixel, index) =>
+          waitForPixelsRollOrDialogAction(pixel).catch((error) => {
+            if (error instanceof RollDialogActionError) {
+              throw error;
+            }
+            const message = error && typeof error.message === "string" ? error.message : String(error);
+            throw new Error(`W${index + 1} ${getConnectedPixelLabel(pixel)}: ${message}`);
+          })
+        )
+      );
+    } finally {
+      stopPixelsLedEffects(activePixels);
+    }
+    if (faces[0] + faces[1] + faces[2] === 18) {
+      void triggerPixelsLedPatternSafe(activePixels, "critSuccess");
+    } else if (faces[0] + faces[1] + faces[2] === 3) {
+      void triggerPixelsLedPatternSafe(activePixels, "critFailure");
+    }
     return {
       faces,
       total: faces[0] + faces[1] + faces[2],
@@ -4924,8 +5550,20 @@ async function roll3d6WithPixels(characterName, rollPixels) {
     const statusMessage = `Warte auf Wurf von ${characterName}: w6 ${i + 1}/3 (${dieLabel}).`;
     setPixelsRollDialogStatus(statusMessage);
     updatePixelsStatus(`Pixels: ${statusMessage}`);
-    const face = await waitForSinglePixelsD6(pixel);
+    await triggerPixelsLedPatternSafe([pixel], "waitInitiative");
+    let face;
+    try {
+      face = await waitForPixelsRollOrDialogAction(pixel);
+    } finally {
+      stopPixelsLedEffects([pixel]);
+    }
     faces.push(face);
+  }
+
+  if (faces[0] + faces[1] + faces[2] === 18) {
+    void triggerPixelsLedPatternSafe(rollPixels.slice(0, 3), "critSuccess");
+  } else if (faces[0] + faces[1] + faces[2] === 3) {
+    void triggerPixelsLedPatternSafe(rollPixels.slice(0, 3), "critFailure");
   }
 
   return {
@@ -4935,17 +5573,33 @@ async function roll3d6WithPixels(characterName, rollPixels) {
   };
 }
 
-async function resolveCharacterRoll(character, usePixelsForTurn) {
+async function resolveCharacterRoll(character, usePixelsForTurn, options = {}) {
+  const forceAutomatic = Boolean(options.forceAutomatic);
+  if (forceAutomatic) {
+    const total = roll3d6();
+    return { total, source: "random", faces: null, critBonusRoll: total === 18 ? d6() : null, error: null };
+  }
+
   const usesManualRoll = character.type === "PC" && character.useManualRoll;
   if (usesManualRoll) {
-    const total = clamp(await requestManualRollTotal(character), 3, 18);
-    return {
-      total,
-      source: "manual",
-      faces: null,
-      critBonusRoll: total === 18 ? await requestManualCriticalBonusRoll(character) : null,
-      manualRollValue: total,
-    };
+    try {
+      const total = clamp(await requestManualRollTotal(character), 3, 18);
+      return {
+        total,
+        source: "manual",
+        faces: null,
+        critBonusRoll: total === 18 ? await requestManualCriticalBonusRoll(character) : null,
+        manualRollValue: total,
+      };
+    } catch (error) {
+      if (error instanceof RollDialogActionError) {
+        if (error.action === "all-auto") {
+          return resolveCharacterRoll(character, usePixelsForTurn, { forceAutomatic: true });
+        }
+        throw error;
+      }
+      throw error;
+    }
   }
 
   const canUsePixelsForCharacter = usePixelsForTurn && character.type === "PC";
@@ -4962,6 +5616,12 @@ async function resolveCharacterRoll(character, usePixelsForTurn) {
         error: null,
       };
     } catch (error) {
+      if (error instanceof RollDialogActionError) {
+        if (error.action === "all-auto") {
+          return resolveCharacterRoll(character, usePixelsForTurn, { forceAutomatic: true });
+        }
+        throw error;
+      }
       const message = error && typeof error.message === "string" ? error.message : String(error);
       updatePixelsStatus(`Pixels: Wurf fehlgeschlagen (${message}), nutze Zufallswürfe.`);
       logEvent(`Pixels-Fallback für ${character.name}: ${message}.`);

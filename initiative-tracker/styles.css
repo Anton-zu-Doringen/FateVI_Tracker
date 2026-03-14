@@ -691,6 +691,38 @@ button:hover {
   flex-wrap: wrap;
 }
 
+.pixels-led-settings {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fffaf3;
+  padding: 0.2rem 0.65rem 0.65rem;
+}
+
+.pixels-led-settings summary {
+  cursor: pointer;
+  font-weight: 700;
+  padding: 0.45rem 0;
+}
+
+.pixels-led-settings-body {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.pixels-led-effect-card {
+  border: 1px solid #eadfc8;
+  border-radius: 8px;
+  background: #fff;
+  padding: 0.65rem;
+  display: grid;
+  gap: 0.55rem;
+}
+
+.pixels-led-effect-card label {
+  display: grid;
+  gap: 0.25rem;
+}
+
 .pixels-roll-dialog-body {
   padding: 1rem;
   display: grid;

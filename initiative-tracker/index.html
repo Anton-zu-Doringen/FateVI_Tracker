@@ -278,7 +278,7 @@
               <tbody>
                 <tr>
                   <th>Wunden</th>
-                  <td></td>
+                  <td><input class="damage-wound-input" type="checkbox" data-damage-index="0" /></td>
                   <td><input class="damage-wound-input" type="checkbox" data-damage-index="1" /></td>
                   <td><input class="damage-wound-input" type="checkbox" data-damage-index="2" /></td>
                   <td><input class="damage-wound-input" type="checkbox" data-damage-index="3" /></td>
@@ -428,6 +428,101 @@
           </select>
         </label>
         <p id="pixels-mode-help" class="hint"></p>
+        <details class="pixels-led-settings">
+          <summary>LED-Effekte</summary>
+          <div class="pixels-led-settings-body">
+            <div class="pixels-led-effect-card">
+              <label class="inline-checkbox">
+                Krit. Erfolg aktiv
+                <input id="pixels-led-crit-success-enabled" type="checkbox" />
+              </label>
+              <label>
+                Farbe
+                <select id="pixels-led-crit-success-color">
+                  <option value="green">Grün</option>
+                  <option value="white">Weiß</option>
+                  <option value="blue">Blau</option>
+                </select>
+              </label>
+              <label>
+                Tempo
+                <select id="pixels-led-crit-success-interval">
+                  <option value="220">Schnell</option>
+                  <option value="320">Normal</option>
+                  <option value="480">Langsam</option>
+                </select>
+              </label>
+              <label>
+                Dauer
+                <select id="pixels-led-crit-success-duration">
+                  <option value="700">0,7 Sek.</option>
+                  <option value="1000">1,0 Sek.</option>
+                  <option value="1500">1,5 Sek.</option>
+                </select>
+              </label>
+            </div>
+            <div class="pixels-led-effect-card">
+              <label class="inline-checkbox">
+                Krit. Fehlschlag aktiv
+                <input id="pixels-led-crit-failure-enabled" type="checkbox" />
+              </label>
+              <label>
+                Farbe 1
+                <select id="pixels-led-crit-failure-color-primary">
+                  <option value="red">Rot</option>
+                  <option value="orange">Orange</option>
+                  <option value="yellow">Gelb</option>
+                </select>
+              </label>
+              <label>
+                Farbe 2
+                <select id="pixels-led-crit-failure-color-secondary">
+                  <option value="orange">Orange</option>
+                  <option value="red">Rot</option>
+                  <option value="yellow">Gelb</option>
+                </select>
+              </label>
+              <label>
+                Tempo
+                <select id="pixels-led-crit-failure-interval">
+                  <option value="120">Schnell</option>
+                  <option value="150">Normal</option>
+                  <option value="240">Langsam</option>
+                </select>
+              </label>
+              <label>
+                Dauer
+                <select id="pixels-led-crit-failure-duration">
+                  <option value="700">0,7 Sek.</option>
+                  <option value="1000">1,0 Sek.</option>
+                  <option value="1500">1,5 Sek.</option>
+                </select>
+              </label>
+            </div>
+            <div class="pixels-led-effect-card">
+              <label class="inline-checkbox">
+                Warten auf INI-Wurf aktiv
+                <input id="pixels-led-wait-enabled" type="checkbox" />
+              </label>
+              <label>
+                Farbe
+                <select id="pixels-led-wait-color">
+                  <option value="white">Weiß</option>
+                  <option value="blue">Blau</option>
+                  <option value="green">Grün</option>
+                </select>
+              </label>
+              <label>
+                Tempo
+                <select id="pixels-led-wait-interval">
+                  <option value="650">Schnell</option>
+                  <option value="900">Normal</option>
+                  <option value="1300">Langsam</option>
+                </select>
+              </label>
+            </div>
+          </div>
+        </details>
         <div id="pixels-assignment-list" class="pixels-assignment-list"></div>
         <div class="actions">
           <button id="pixels-disconnect-all" class="ghost" type="button">Alle Pixels trennen</button>
@@ -441,6 +536,10 @@
         <h3 id="pixels-roll-title">INI Würfelphase</h3>
         <p id="pixels-roll-status">Warte auf Würfe...</p>
         <div id="pixels-roll-list" class="pixels-roll-list" aria-live="polite"></div>
+        <div class="actions pixels-roll-dialog-actions">
+          <button id="pixels-roll-cancel" class="ghost" type="button">Abbrechen</button>
+          <button id="pixels-roll-auto-all" type="button">Alle automatisch würfeln</button>
+        </div>
       </div>
     </dialog>
 
